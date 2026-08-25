@@ -1,7 +1,7 @@
 import requests
 import streamlit as st
 
-# Replace with your deployed Render URL or keep local for testing
+# Replace with your deployed Render URL or local backend
 BACKEND_URL = "https://zerodha-algo-bot-vb36.onrender.com"
 
 st.set_page_config(page_title="Mobile Bot Control Center", page_icon="📱", layout="centered")
@@ -51,30 +51,36 @@ except Exception:
     st.warning("⚠️ Waiting for backend server connection or valid Zerodha API session...")
 
 # ==========================================
-# 3. MANUAL TRADE ENTRY OVERRIDE (DYNAMIC)
+# 3. MANUAL TRADE ENTRY OVERRIDE (AUTO-SELECT)
 # ==========================================
 st.markdown("---")
 st.subheader("⚡ Fire Manual Scalp Order")
 
-# Standard Index Lot Sizes
+# Dynamic Index Lot Sizes Mapping (Updated Standard Sizes)
 LOT_SIZES = {
-    "NIFTY": 75,
-    "BANKNIFTY": 15,
-    "FINNIFTY": 25,
-    "MIDCPNIFTY": 50,
-    "SENSEX": 10,
-    "BANKEX": 15
+    "NIFTY": 65,
+    "BANKNIFTY": 30,
+    "FINNIFTY": 60,
+    "MIDCPNIFTY": 120,
+    "SENSEX": 20
 }
 
+# Index Selection
 symbol = st.selectbox("Index Symbol", list(LOT_SIZES.keys()))
-
-# Dynamically set quantity based on selected index
 default_qty = LOT_SIZES[symbol]
-
-tradingsymbol = st.text_input("Trading Symbol", value=f"{symbol}26AUG24200CE")
 exchange = "BFO" if symbol in ["SENSEX", "BANKEX"] else "NFO"
 
-# Dynamic instrument token fetch attempt
+# Symbol Constructor Inputs
+col_opt, col_strike = st.columns(2)
+opt_type = col_opt.selectbox("Option Type", ["CE", "PE"])
+strike_price = col_strike.number_input("Strike Price", value=24200 if symbol == "NIFTY" else 52000, step=100)
+expiry_code = st.text_input("Expiry Tag (e.g. 26AUG)", value="26AUG")
+
+# Auto-Generated Trading Symbol
+auto_tradingsymbol = f"{symbol}{expiry_code}{int(strike_price)}{opt_type}"
+tradingsymbol = st.text_input("Trading Symbol (Auto-Generated)", value=auto_tradingsymbol)
+
+# Auto-Fetch Instrument Token from Backend API
 auto_token = 0
 try:
     token_res = requests.get(f"{BACKEND_URL}/api/get-token?symbol={tradingsymbol}").json()
@@ -83,6 +89,8 @@ except Exception:
     pass
 
 token_id = st.number_input("Instrument Token", value=auto_token if auto_token else 256265)
+
+# Order Controls
 side = st.radio("Side", ["BUY", "SELL"], horizontal=True)
 qty = st.number_input("Quantity", value=default_qty, step=default_qty)
 entry_price = st.number_input("Limit Entry Rate (₹)", value=100.0, step=1.0)
