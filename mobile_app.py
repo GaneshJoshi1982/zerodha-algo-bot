@@ -3,7 +3,7 @@ import streamlit as st
 
 BACKEND_URL = "https://zerodha-algo-bot-vb36.onrender.com"
 
-st.set_page_config(page_title="Mobile Bot Control Center", page_icon="📱", layout="narrow")
+st.set_page_config(page_title="Mobile Bot Control Center", page_icon="📱", layout="centered")
 
 st.title("📱 Mobile Algo Bot Control Center")
 st.caption("Connected to Cloud Backend Engine | VWAP + 5M EMA-9 Auto-Trailing Active")
