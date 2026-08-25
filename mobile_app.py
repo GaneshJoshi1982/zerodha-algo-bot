@@ -1,7 +1,7 @@
 import requests
 import streamlit as st
 
-BACKEND_URL = "http://localhost:8000"
+BACKEND_URL = "https://zerodha-algo-bot-vb36.onrender.com"
 
 st.set_page_config(page_title="Mobile Bot Control Center", page_icon="📱", layout="narrow")
 
