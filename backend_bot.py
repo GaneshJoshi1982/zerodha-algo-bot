@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+import math
 import os
 import threading
 import time
@@ -14,9 +15,8 @@ import pyotp
 import requests
 
 # ==========================================
-# 1. CONFIGURATION & CONSTANTS
+# 1. CONFIGURATION & ENVIRONMENT SETUP
 # ==========================================
-# Read from Render Environment Variables (Fallback to local strings if testing)
 API_KEY = os.getenv("API_KEY", "magym2s4yk13gsze")
 API_SECRET = os.getenv("API_SECRET", "83cuxyx91lv9ae371ogcs6ckvu5kto8q")
 USER_ID = os.getenv("ZERODHA_USER_ID", "YOUR_USER_ID")
@@ -25,7 +25,7 @@ TOTP_SECRET = os.getenv("ZERODHA_TOTP_SECRET", "YOUR_TOTP_SECRET_KEY")
 
 TOKEN_FILE = "access_token.txt"
 
-# Standard Regulatory Lot Sizes
+# Regulatory Lot Sizes
 LOT_SIZES = {
     "NIFTY": 65,
     "BANKNIFTY": 30,
@@ -35,9 +35,16 @@ LOT_SIZES = {
     "BANKEX": 30,
 }
 
-app = FastAPI(title="Zerodha Automated Execution Bot Backend")
+# Overtrading & Risk Protection Caps
+MAX_DAILY_TRADES = 3
+MAX_DAILY_LOSS = -1000.0  # Stop trading if cumulative loss hits ₹1,000
+DAILY_TRADE_COUNT = 0
+DAILY_CUMULATIVE_PNL = 0.0
 
-# Memory State
+app = FastAPI(
+    title="Zerodha Institutional LinReg Execution Bot Engine", version="2.0"
+)
+
 ACTIVE_POSITIONS = {}
 TRADE_LOGS = []
 
@@ -57,41 +64,40 @@ def get_kite_client():
 
 
 # ==========================================
-# 2. AUTOMATED DAILY LOGIN SYSTEM (PyOTP)
+# 2. AUTOMATED DAILY 2FA LOGIN SYSTEM
 # ==========================================
 @app.post("/api/auto-login")
 def auto_login_zerodha():
-    """Automates Zerodha's 2FA login using PyOTP to fetch and save a fresh access_token."""
     global TRADE_LOGS
     try:
         session = requests.Session()
 
-        # Step 1: Submit Username & Password
-        login_payload = {"user_id": USER_ID, "password": PASSWORD}
+        # Step 1: Submit Credentials
         res1 = session.post(
-            "https://kite.zerodha.com/api/login", data=login_payload
+            "https://kite.zerodha.com/api/login",
+            data={"user_id": USER_ID, "password": PASSWORD},
         ).json()
         if res1.get("status") != "success":
             raise Exception(f"Phase 1 Login Failed: {res1}")
 
         request_id = res1["data"]["request_id"]
 
-        # Step 2: Auto-Generate 2FA TOTP Code using PyOTP
+        # Step 2: Auto-Generate 2FA TOTP Code
         totp = pyotp.TOTP(TOTP_SECRET)
         twofa_code = totp.now()
 
-        twofa_payload = {
-            "user_id": USER_ID,
-            "request_id": request_id,
-            "twofa_value": twofa_code,
-        }
         res2 = session.post(
-            "https://kite.zerodha.com/api/twofa", data=twofa_payload
+            "https://kite.zerodha.com/api/twofa",
+            data={
+                "user_id": USER_ID,
+                "request_id": request_id,
+                "twofa_value": twofa_code,
+            },
         ).json()
         if res2.get("status") != "success":
             raise Exception(f"Phase 2 2FA Failed: {res2}")
 
-        # Step 3: Authorize OAuth to get request_token
+        # Step 3: OAuth Redirect Token Capture
         auth_url = (
             f"https://kite.zerodha.com/connect/login?v=3&api_key={API_KEY}"
         )
@@ -101,25 +107,22 @@ def auto_login_zerodha():
         query_params = parse_qs(parsed_url.query)
 
         if "request_token" not in query_params:
-            raise Exception("Request Token missing in OAuth redirect response.")
+            raise Exception("Request Token missing in OAuth redirect.")
 
         request_token = query_params["request_token"][0]
 
-        # Step 4: Exchange request_token for final access_token
+        # Step 4: Generate Session Access Token
         kite = KiteConnect(api_key=API_KEY)
         session_data = kite.generate_session(
             request_token, api_secret=API_SECRET
         )
         access_token = session_data["access_token"]
 
-        # Save token to file
         with open(TOKEN_FILE, "w") as f:
             f.write(access_token)
 
         msg = f"🔑 [{datetime.now().strftime('%H:%M:%S')}] ZERODHA AUTO-LOGIN SUCCESSFUL!"
         TRADE_LOGS.append(msg)
-        print(msg)
-
         return {
             "status": "SUCCESS",
             "message": "Zerodha Auto-Login Complete!",
@@ -133,31 +136,46 @@ def auto_login_zerodha():
 
 
 # ==========================================
-# 3. INDICATOR LOGIC (VWAP & EMA-9)
+# 3. LINREG CANDLES & INDICATOR MATH
 # ==========================================
-def calculate_vwap_and_ema9(df_5m):
-    if df_5m is None or df_5m.empty or len(df_5m) < 5:
-        return 0.0, 0.0
+def calculate_linreg_and_indicators(df_3m, period=11):
+    """Computes Linear Regression Candles (LinReg) & 3M EMA-9 to eliminate false wicks."""
+    if df_3m is None or df_3m.empty or len(df_3m) < period:
+        return 0.0, 0.0, 0.0
 
-    df = df_5m.copy()
-    df["tp"] = (df["high"] + df["low"] + df["close"]) / 3.0
-    df["vwap"] = (df["tp"] * df["volume"]).cumsum() / df[
-        "volume"
-    ].cumsum().replace(0, np.nan)
+    df = df_3m.copy()
+    x = np.arange(period)
+
+    def linreg_val(series):
+        if len(series) < period:
+            return series.iloc[-1]
+        slope, intercept = np.polyfit(x, series, 1)
+        return slope * (period - 1) + intercept
+
+    # Linear Regression Smoothed Close & Open
+    df["lr_close"] = (
+        df["close"].rolling(window=period).apply(linreg_val, raw=False)
+    )
+    df["lr_open"] = (
+        df["open"].rolling(window=period).apply(linreg_val, raw=False)
+    )
+
+    # 3-Min EMA-9 Calculation
     df["ema_9"] = df["close"].ewm(span=9, adjust=False).mean()
 
-    latest_vwap = round(df["vwap"].iloc[-1], 2)
-    latest_ema9 = round(df["ema_9"].iloc[-1], 2)
-    return latest_vwap, latest_ema9
+    latest_lr_close = round(df["lr_close"].iloc[-2], 2)  # Last closed candle
+    latest_lr_open = round(df["lr_open"].iloc[-2], 2)
+    latest_ema9 = round(df["ema_9"].iloc[-2], 2)
+
+    return latest_lr_close, latest_lr_open, latest_ema9
 
 
 # ==========================================
-# 4. BACKGROUND AUTOMATED TRAILING ENGINE
+# 4. BACKGROUND TRAILING & EXECUTION ENGINE
 # ==========================================
 def background_trailing_loop():
-    print(
-        "⚡ Background Execution Engine & Dynamic Trailing Engine Running 24/7."
-    )
+    global DAILY_CUMULATIVE_PNL
+    print("⚡ LinReg Multi-Timeframe Background Engine Active 24/7.")
     while True:
         try:
             kite = get_kite_client()
@@ -186,7 +204,7 @@ def background_trailing_loop():
                     # 1. Target Hit Check (+40%)
                     if ltp >= pos["target_price"]:
                         execute_market_exit(
-                            pos_id, reason="TARGET HIT (40%+ PROFIT)"
+                            pos_id, reason="TARGET HIT (+40% PROFIT)"
                         )
                         continue
 
@@ -197,7 +215,7 @@ def background_trailing_loop():
                         )
                         continue
 
-                    # 3. Dynamic EMA-9 Trailing Calculation
+                    # 3. LinReg Smoothed Trailing SL Check (3-Minute Chart)
                     to_date = datetime.now()
                     from_date = to_date.replace(
                         hour=9, minute=15, second=0, microsecond=0
@@ -206,14 +224,16 @@ def background_trailing_loop():
                         instrument_token=token,
                         from_date=from_date,
                         to_date=to_date,
-                        interval="5minute",
+                        interval="3minute",
                     )
-                    df_5m = pd.DataFrame(candles)
+                    df_3m = pd.DataFrame(candles)
 
-                    if not df_5m.empty:
-                        _, ema9_val = calculate_vwap_and_ema9(df_5m)
+                    if not df_3m.empty:
+                        lr_close, lr_open, ema9_val = (
+                            calculate_linreg_and_indicators(df_3m)
+                        )
 
-                        # Trail SL higher if EMA-9 moves above initial SL
+                        # Trail SL higher when EMA-9 moves above initial SL
                         if (
                             ema9_val > pos["current_sl"]
                             and ltp > pos["entry_price"]
@@ -223,14 +243,14 @@ def background_trailing_loop():
                                 f"📈 [{datetime.now().strftime('%H:%M:%S')}] TRAILING SL RAISED to ₹{ema9_val} for {tradingsymbol}"
                             )
 
-                        # Auto-Exit on 5M Candle Close below EMA-9
-                        latest_close = df_5m["close"].iloc[-1]
+                        # Exit on LinReg Candle Close Below EMA-9 (Filters false tick wicks)
                         if (
-                            latest_close < ema9_val
+                            lr_close < ema9_val
                             and ema9_val > pos["entry_price"]
                         ):
                             execute_market_exit(
-                                pos_id, reason="5M EMA-9 BREACH (PROFIT LOCKED)"
+                                pos_id,
+                                reason="3M LINREG CANDLE BREACHED EMA-9 (PROFIT LOCKED)",
                             )
 
         except Exception as e:
@@ -239,7 +259,6 @@ def background_trailing_loop():
         time.sleep(3)
 
 
-# Start Background Thread on Launch
 trailing_thread = threading.Thread(
     target=background_trailing_loop, daemon=True
 )
@@ -247,7 +266,7 @@ trailing_thread.start()
 
 
 # ==========================================
-# 5. FASTAPI API ENDPOINTS
+# 5. FASTAPI ENDPOINTS
 # ==========================================
 class OrderRequest(BaseModel):
     symbol: str
@@ -261,6 +280,7 @@ class OrderRequest(BaseModel):
 
 
 def execute_market_exit(pos_id: str, reason: str):
+    global DAILY_CUMULATIVE_PNL
     pos = ACTIVE_POSITIONS.get(pos_id)
     if not pos or pos["status"] != "OPEN":
         return False
@@ -287,8 +307,13 @@ def execute_market_exit(pos_id: str, reason: str):
         )
         pos["status"] = f"CLOSED ({reason})"
         pos["exit_price"] = pos.get("current_ltp", 0.0)
+
+        # Update Daily PnL
+        realized = pos["unrealized_pnl"]
+        DAILY_CUMULATIVE_PNL += realized
+
         TRADE_LOGS.append(
-            f"🔴 [{datetime.now().strftime('%H:%M:%S')}] AUTO EXIT: {pos['tradingsymbol']} | Reason: {reason}"
+            f"🔴 [{datetime.now().strftime('%H:%M:%S')}] AUTO EXIT: {pos['tradingsymbol']} | PnL: ₹{realized} | Reason: {reason}"
         )
         return True
     except Exception as e:
@@ -298,16 +323,11 @@ def execute_market_exit(pos_id: str, reason: str):
         return False
 
 
-# --- Dynamic Instrument & Symbol Lookup Endpoints ---
 @app.get("/api/get-symbol")
 def get_auto_symbol(index: str, strike: int, type: str):
-    """Fetches the active nearest expiry contract trading symbol automatically."""
     kite = get_kite_client()
     if not kite:
-        return {
-            "status": "ERROR",
-            "message": "Zerodha API Unavailable. Please Auto-Login.",
-        }
+        return {"status": "ERROR", "message": "Zerodha API Unavailable."}
 
     try:
         exchange = "BFO" if index in ["SENSEX", "BANKEX"] else "NFO"
@@ -324,7 +344,7 @@ def get_auto_symbol(index: str, strike: int, type: str):
         if not matching:
             return {
                 "status": "ERROR",
-                "message": f"No matching contract found for {index} {strike} {type}",
+                "message": f"No contract found for {index} {strike} {type}",
             }
 
         matching.sort(key=lambda x: x["expiry"])
@@ -342,7 +362,6 @@ def get_auto_symbol(index: str, strike: int, type: str):
 
 @app.get("/api/get-token")
 def get_token(symbol: str):
-    """Fetches instrument token for a given symbol string."""
     kite = get_kite_client()
     if not kite:
         return {"status": "ERROR", "instrument_token": 0}
@@ -354,9 +373,23 @@ def get_token(symbol: str):
         return {"status": "ERROR", "instrument_token": 0}
 
 
-# --- Order Execution Endpoints ---
 @app.post("/api/order/submit")
 def submit_automated_order(req: OrderRequest):
+    global DAILY_TRADE_COUNT, DAILY_CUMULATIVE_PNL
+
+    # Overtrading & Daily Max Loss Safeguards
+    if DAILY_TRADE_COUNT >= MAX_DAILY_TRADES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Daily trade limit ({MAX_DAILY_TRADES}) reached! Order blocked to prevent overtrading.",
+        )
+
+    if DAILY_CUMULATIVE_PNL <= MAX_DAILY_LOSS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Daily Loss Limit (₹{MAX_DAILY_LOSS}) reached! Bot locked for safety.",
+        )
+
     kite = get_kite_client()
     if not kite:
         raise HTTPException(
@@ -403,8 +436,9 @@ def submit_automated_order(req: OrderRequest):
             "unrealized_pnl": 0.0,
         }
 
+        DAILY_TRADE_COUNT += 1
         TRADE_LOGS.append(
-            f"🟢 [{datetime.now().strftime('%H:%M:%S')}] ORDER FIRED: {req.transaction_type} {req.quantity}x {req.tradingsymbol} @ ₹{req.price}"
+            f"🟢 [{datetime.now().strftime('%H:%M:%S')}] ORDER FIRED ({DAILY_TRADE_COUNT}/{MAX_DAILY_TRADES}): {req.transaction_type} {req.quantity}x {req.tradingsymbol} @ ₹{req.price}"
         )
         return {
             "status": "SUCCESS",
