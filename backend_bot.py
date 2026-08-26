@@ -46,7 +46,7 @@ LAST_EXIT_TIMESTAMP = None
 COOLING_PERIOD_SECONDS = 15 * 60
 
 app = FastAPI(
-    title="Zerodha Institutional LinReg Execution Bot Engine", version="3.2"
+    title="Zerodha Institutional LinReg Execution Bot Engine", version="3.3"
 )
 
 ACTIVE_POSITIONS = {}
@@ -73,10 +73,10 @@ def get_kite_client():
 # ==========================================
 @app.get("/api/auto-login")
 def auto_login_zerodha():
-    """Automates Zerodha's 2FA login using PyOTP via GET for 1-click browser/app activation.
+    """Automates Zerodha's 2FA login using PyOTP via GET for 1-click activation.
 
-    Scans entire redirect history to extract request_token reliably even with
-    127.0.0.1 redirect URLs.
+    Uses allow_redirects=False to intercept request_token from Location header
+    without attempting connection to 127.0.0.1.
     """
     global TRADE_LOGS
     try:
@@ -107,27 +107,32 @@ def auto_login_zerodha():
         if res2.get("status") != "success":
             raise Exception(f"Phase 2 2FA Failed: {res2}")
 
-        # Step 3: Capture OAuth Redirect Token across all response histories
+        # Step 3: Capture OAuth Redirect (allow_redirects=False blocks 127.0.0.1 connection errors)
         auth_url = (
             f"https://kite.zerodha.com/connect/login?v=3&api_key={API_KEY}"
         )
-        auth_res = session.get(auth_url, allow_redirects=True)
+        auth_res = session.get(auth_url, allow_redirects=False)
 
-        request_token = None
-        # Loop through redirect history and final response to catch request_token
-        for resp in auth_res.history + [auth_res]:
-            # Check Location header or response URL
-            target_url = resp.headers.get("Location", resp.url)
-            parsed = urlparse(target_url)
-            params = parse_qs(parsed.query)
-            if "request_token" in params:
-                request_token = params["request_token"][0]
-                break
+        # Retrieve redirect target from response headers
+        redirect_location = auth_res.headers.get("Location", auth_res.url)
+        parsed_url = urlparse(redirect_location)
+        query_params = parse_qs(parsed_url.query)
 
-        if not request_token:
+        # Fallback check across history if Zerodha did a double redirect
+        if "request_token" not in query_params:
+            for resp in auth_res.history:
+                loc = resp.headers.get("Location", resp.url)
+                params = parse_qs(urlparse(loc).query)
+                if "request_token" in params:
+                    query_params = params
+                    break
+
+        if "request_token" not in query_params:
             raise Exception(
-                f"Request Token missing. Check Redirect URL setting in Developer Console. Final URL: {auth_res.url}"
+                f"Request Token missing. Redirect Location: {redirect_location}"
             )
+
+        request_token = query_params["request_token"][0]
 
         # Step 4: Exchange request_token for final Session Access Token
         kite = KiteConnect(api_key=API_KEY)
@@ -340,7 +345,7 @@ def execute_market_exit(pos_id: str, reason: str):
 
 @app.get("/api/get-symbol")
 def get_auto_symbol(index: str, strike: int, type: str):
-    """Dynamically resolves the active contract symbol and instrument token."""
+    """Dynamically resolves active contract symbol and instrument token."""
     kite = get_kite_client()
     if not kite:
         return {"status": "ERROR", "message": "Zerodha API Unavailable."}
