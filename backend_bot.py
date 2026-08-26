@@ -41,7 +41,7 @@ DAILY_CUMULATIVE_PNL = 0.0
 LAST_EXIT_TIMESTAMP = None
 COOLING_PERIOD_SECONDS = 15 * 60
 
-app = FastAPI(title="Zerodha Institutional LinReg Execution Bot Engine", version="4.0")
+app = FastAPI(title="Zerodha Institutional LinReg Execution Bot Engine", version="4.1")
 
 ACTIVE_POSITIONS = {}
 TRADE_LOGS = []
@@ -60,11 +60,21 @@ def get_kite_client():
         return None
 
 # ==========================================
-# 2. HYBRID AUTHENTICATION SYSTEM
+# 2. HYBRID AUTHENTICATION & SHARED SESSION ENDPOINTS
 # ==========================================
+@app.get("/api/get-access-token")
+def get_access_token():
+    """Returns the saved daily access_token for shared client apps (like local desktop app.py)."""
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, "r") as f:
+            token = f.read().strip()
+        if token:
+            return {"status": "SUCCESS", "access_token": token}
+    return {"status": "ERROR", "message": "No active access token stored yet."}
+
 @app.get("/api/set-request-token")
 def set_request_token(request_token: str):
-    """Exchanges a manually pasted request_token for a 24-hour access_token."""
+    """Exchanges a request_token for a 24-hour session access_token."""
     global TRADE_LOGS
     try:
         kite = KiteConnect(api_key=API_KEY)
