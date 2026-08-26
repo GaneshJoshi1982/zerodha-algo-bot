@@ -25,6 +25,7 @@ TOTP_SECRET = os.getenv("ZERODHA_TOTP_SECRET", "YOUR_TOTP_SECRET_KEY")
 
 TOKEN_FILE = "access_token.txt"
 
+# Regulatory Lot Sizes
 LOT_SIZES = {
     "NIFTY": 65,
     "BANKNIFTY": 30,
@@ -45,7 +46,7 @@ LAST_EXIT_TIMESTAMP = None
 COOLING_PERIOD_SECONDS = 15 * 60
 
 app = FastAPI(
-    title="Zerodha Institutional LinReg Execution Bot Engine", version="3.0"
+    title="Zerodha Institutional LinReg Execution Bot Engine", version="3.1"
 )
 
 ACTIVE_POSITIONS = {}
@@ -87,7 +88,7 @@ def auto_login_zerodha():
 
         request_id = res1["data"]["request_id"]
 
-        # Step 2: Auto-Generate 2FA TOTP Code
+        # Step 2: Auto-Generate 2FA TOTP Code via PyOTP
         totp = pyotp.TOTP(TOTP_SECRET)
         twofa_code = totp.now()
 
@@ -102,21 +103,20 @@ def auto_login_zerodha():
         if res2.get("status") != "success":
             raise Exception(f"Phase 2 2FA Failed: {res2}")
 
-        # Step 3: OAuth Redirect Capture
-        auth_url = (
-            f"https://kite.zerodha.com/connect/login?v=3&api_key={API_KEY}"
-        )
-        auth_res = session.get(auth_url, allow_redirects=True)
+        # Step 3: Capture OAuth Redirect (allow_redirects=False prevents 127.0.0.1 connection errors)
+        auth_url = f"https://kite.zerodha.com/connect/login?v=3&api_key={API_KEY}"
+        auth_res = session.get(auth_url, allow_redirects=False)
 
-        parsed_url = urlparse(auth_res.url)
+        redirect_location = auth_res.headers.get("Location", auth_res.url)
+        parsed_url = urlparse(redirect_location)
         query_params = parse_qs(parsed_url.query)
 
         if "request_token" not in query_params:
-            raise Exception("Request Token missing in OAuth redirect.")
+            raise Exception(f"Request Token missing. Redirect URL: {redirect_location}")
 
         request_token = query_params["request_token"][0]
 
-        # Step 4: Generate Session Access Token
+        # Step 4: Exchange request_token for final Session Access Token
         kite = KiteConnect(api_key=API_KEY)
         session_data = kite.generate_session(
             request_token, api_secret=API_SECRET
