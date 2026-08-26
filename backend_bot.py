@@ -1,27 +1,18 @@
 import os
 import time
 import math
-import pyotp
-import requests
-import asyncio
-import threading
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from urllib.parse import urlparse, parse_qs
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from kiteconnect import KiteConnect
 
 # ==========================================
-# 1. CONFIGURATION & ENVIRONMENT SETUP
+# 1. ENVIRONMENT CONFIGURATION & CONSTANTS
 # ==========================================
-API_KEY = os.getenv("API_KEY", "magym2s4yk13gsze")
-API_SECRET = os.getenv("API_SECRET", "83cuxyx91lv9ae371ogcs6ckvu5kto8q")
-USER_ID = os.getenv("ZERODHA_USER_ID", "YOUR_USER_ID")
-PASSWORD = os.getenv("ZERODHA_PASSWORD", "YOUR_PASSWORD")
-TOTP_SECRET = os.getenv("ZERODHA_TOTP_SECRET", "YOUR_TOTP_SECRET_KEY")
-
+API_KEY = os.getenv("API_KEY", "your_api_key")
+API_SECRET = os.getenv("API_SECRET", "your_api_secret")
 TOKEN_FILE = "access_token.txt"
 
 LOT_SIZES = {
@@ -33,206 +24,170 @@ LOT_SIZES = {
     "BANKEX": 30
 }
 
+# Risk Management Parameters
 MAX_DAILY_TRADES = 3
 MAX_DAILY_LOSS = -1000.0
+COOLING_PERIOD_SECONDS = 15 * 60  # 15 minutes cooling-off timer
+
+# Runtime State Tracking
 DAILY_TRADE_COUNT = 0
 DAILY_CUMULATIVE_PNL = 0.0
-
 LAST_EXIT_TIMESTAMP = None
-COOLING_PERIOD_SECONDS = 15 * 60
-
-app = FastAPI(title="Zerodha Institutional LinReg Execution Bot Engine", version="4.1")
-
 ACTIVE_POSITIONS = {}
 TRADE_LOGS = []
 
+app = FastAPI(title="Institutional LinReg & HM Execution Engine", version="5.0")
+
+
 def get_kite_client():
+    """Restores active Kite Connect session from token file."""
     kite = KiteConnect(api_key=API_KEY)
     try:
         if os.path.exists(TOKEN_FILE):
             with open(TOKEN_FILE, "r") as f:
-                access_token = f.read().strip()
-            kite.set_access_token(access_token)
+                token = f.read().strip()
+            kite.set_access_token(token)
             return kite
         return None
     except Exception as e:
-        print(f"Error restoring Kite Client: {e}")
+        print(f"Error initializing Kite Client: {e}")
         return None
 
-# ==========================================
-# 2. HYBRID AUTHENTICATION & SHARED SESSION ENDPOINTS
-# ==========================================
-@app.get("/api/get-access-token")
-def get_access_token():
-    """Returns the saved daily access_token for shared client apps (like local desktop app.py)."""
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE, "r") as f:
-            token = f.read().strip()
-        if token:
-            return {"status": "SUCCESS", "access_token": token}
-    return {"status": "ERROR", "message": "No active access token stored yet."}
-
-@app.get("/api/set-request-token")
-def set_request_token(request_token: str):
-    """Exchanges a request_token for a 24-hour session access_token."""
-    global TRADE_LOGS
-    try:
-        kite = KiteConnect(api_key=API_KEY)
-        session_data = kite.generate_session(request_token, api_secret=API_SECRET)
-        access_token = session_data["access_token"]
-        
-        with open(TOKEN_FILE, "w") as f:
-            f.write(access_token)
-            
-        msg = f"🔑 [{datetime.now().strftime('%H:%M:%S')}] SESSION TOKEN SET SUCCESSFULLY!"
-        TRADE_LOGS.append(msg)
-        return {"status": "SUCCESS", "message": "Token active for 24 hours!", "access_token": access_token}
-    except Exception as e:
-        return {"status": "FAILED", "error": str(e)}
-
-@app.get("/api/auto-login")
-def auto_login_zerodha(request_token: str = None):
-    """Handles callback from Zerodha browser redirect or background login."""
-    global TRADE_LOGS
-    
-    if request_token:
-        return set_request_token(request_token)
-
-    try:
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        })
-
-        res1 = session.post("https://kite.zerodha.com/api/login", data={"user_id": USER_ID, "password": PASSWORD}).json()
-        if res1.get("status") != "success":
-            raise Exception(f"Phase 1 Login Failed: {res1}")
-
-        request_id = res1["data"]["request_id"]
-        totp = pyotp.TOTP(TOTP_SECRET)
-        twofa_code = totp.now()
-
-        res2 = session.post("https://kite.zerodha.com/api/twofa", data={"user_id": USER_ID, "request_id": request_id, "twofa_value": twofa_code}).json()
-        if res2.get("status") != "success":
-            raise Exception(f"Phase 2 2FA Failed: {res2}")
-
-        auth_url = f"https://kite.zerodha.com/connect/login?v=3&api_key={API_KEY}"
-        auth_res = session.get(auth_url, allow_redirects=True)
-
-        extracted_token = None
-        for resp in auth_res.history + [auth_res]:
-            target_url = resp.headers.get("Location", resp.url)
-            params = parse_qs(urlparse(target_url).query)
-            if "request_token" in params:
-                extracted_token = params["request_token"][0]
-                break
-
-        if not extracted_token:
-            raise Exception(f"Zerodha halted at interactive prompt: {auth_res.url}")
-
-        kite = KiteConnect(api_key=API_KEY)
-        session_data = kite.generate_session(extracted_token, api_secret=API_SECRET)
-        access_token = session_data["access_token"]
-
-        with open(TOKEN_FILE, "w") as f:
-            f.write(access_token)
-
-        msg = f"🔑 [{datetime.now().strftime('%H:%M:%S')}] ZERODHA AUTO-LOGIN SUCCESSFUL!"
-        TRADE_LOGS.append(msg)
-        return {"status": "SUCCESS", "message": "Zerodha Auto-Login Complete!", "access_token": access_token}
-
-    except Exception as e:
-        err_msg = f"❌ Auto-Login Failed: {str(e)}"
-        TRADE_LOGS.append(err_msg)
-        return {"status": "FAILED", "error": str(e)}
 
 # ==========================================
-# 3. LINREG CANDLES & INDICATOR MATH
+# 2. INDICATOR ENGINE: RSI(9) & EMA(3) CROSS
 # ==========================================
-def calculate_linreg_and_indicators(df_3m, period=11):
-    if df_3m is None or df_3m.empty or len(df_3m) < period:
-        return 0.0, 0.0, 0.0
+def calculate_rsi(series, period=9):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -1 * delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+
+def check_hm_reversal_signal(df_3m):
+    """
+    Evaluates 3M Hilega-Milega (HM) logic:
+    RSI(9) crossing above EMA(3) of RSI with Volume confirmation.
+    No RSI >= 50 restriction to catch early support reversals.
+    """
+    if df_3m is None or df_3m.empty or len(df_3m) < 20:
+        return False, "⚪ Insufficient Candle Data"
 
     df = df_3m.copy()
-    x = np.arange(period)
+    df["rsi_9"] = calculate_rsi(df["close"], period=9)
+    df["rsi_ema_3"] = df["rsi_9"].ewm(span=3, adjust=False).mean()
+    df["vol_avg20"] = df["volume"].rolling(20).mean()
 
-    def linreg_val(series):
-        if len(series) < period:
-            return series.iloc[-1]
-        slope, intercept = np.polyfit(x, series, 1)
-        return slope * (period - 1) + intercept
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
 
-    df["lr_close"] = df["close"].rolling(window=period).apply(linreg_val, raw=False)
-    df["lr_open"] = df["open"].rolling(window=period).apply(linreg_val, raw=False)
-    df["ema_9"] = df["close"].ewm(span=9, adjust=False).mean()
+    rsi_gt_ema3 = latest["rsi_9"] > latest["rsi_ema_3"]
+    fresh_cross = (prev["rsi_9"] <= prev["rsi_ema_3"]) and rsi_gt_ema3
+    vol_surge = latest["volume"] >= (1.2 * latest["vol_avg20"])
 
-    latest_lr_close = round(df["lr_close"].iloc[-2], 2)
-    latest_lr_open = round(df["lr_open"].iloc[-2], 2)
-    latest_ema9 = round(df["ema_9"].iloc[-2], 2)
+    if fresh_cross and vol_surge:
+        return True, f"🚀 FRESH HM CROSS: RSI(9) [{round(latest['rsi_9'], 1)}] > EMA(3) + Vol Surge"
+    elif rsi_gt_ema3 and vol_surge:
+        return True, f"🟢 HM CONTINUATION: Holding RSI(9) > EMA(3)"
 
-    return latest_lr_close, latest_lr_open, latest_ema9
+    return False, "⚪ No Signal"
 
-# ==========================================
-# 4. BACKGROUND TRAILING & EXECUTION ENGINE
-# ==========================================
-def background_trailing_loop():
-    global DAILY_CUMULATIVE_PNL
-    print("⚡ LinReg Multi-Timeframe Background Engine Active 24/7.")
-    while True:
-        try:
-            kite = get_kite_client()
-            if kite and ACTIVE_POSITIONS:
-                for pos_id, pos in list(ACTIVE_POSITIONS.items()):
-                    if pos["status"] != "OPEN":
-                        continue
-
-                    tradingsymbol = pos["tradingsymbol"]
-                    exchange = pos["exchange"]
-                    token = pos["instrument_token"]
-
-                    quote_key = f"{exchange}:{tradingsymbol}"
-                    quotes = kite.quote([quote_key])
-                    ltp = quotes.get(quote_key, {}).get("last_price", 0.0)
-
-                    if ltp <= 0:
-                        continue
-
-                    pos["current_ltp"] = ltp
-                    pos["unrealized_pnl"] = round((ltp - pos["entry_price"]) * pos["quantity"], 2)
-
-                    if ltp >= pos["target_price"]:
-                        execute_market_exit(pos_id, reason="TARGET HIT (+40% PROFIT)")
-                        continue
-
-                    if ltp <= pos["current_sl"]:
-                        execute_market_exit(pos_id, reason="HARD STOP LOSS BREACHED")
-                        continue
-
-                    to_date = datetime.now()
-                    from_date = to_date.replace(hour=9, minute=15, second=0, microsecond=0)
-                    candles = kite.historical_data(instrument_token=token, from_date=from_date, to_date=to_date, interval="3minute")
-                    df_3m = pd.DataFrame(candles)
-
-                    if not df_3m.empty:
-                        lr_close, lr_open, ema9_val = calculate_linreg_and_indicators(df_3m)
-
-                        if ema9_val > pos["current_sl"] and ltp > pos["entry_price"]:
-                            pos["current_sl"] = ema9_val
-                            TRADE_LOGS.append(f"📈 [{datetime.now().strftime('%H:%M:%S')}] TRAILING SL RAISED to ₹{ema9_val} for {tradingsymbol}")
-
-                        if lr_close < ema9_val and ema9_val > pos["entry_price"]:
-                            execute_market_exit(pos_id, reason="3M LINREG CANDLE BREACHED EMA-9 (PROFIT LOCKED)")
-
-        except Exception as e:
-            print(f"Error in background engine: {e}")
-
-        time.sleep(3)
-
-trailing_thread = threading.Thread(target=background_trailing_loop, daemon=True)
-trailing_thread.start()
 
 # ==========================================
-# 5. FASTAPI API ENDPOINTS
+# 3. SCANNING & REVERSAL STRIKE SELECTION
+# ==========================================
+def scan_and_select_strike(kite, symbol: str):
+    """
+    Scans live market conditions for mid-day reversals:
+    1. Checks Spot vs 15M VWAP bias (CE above VWAP, PE below VWAP).
+    2. Calculates slightly OTM option strike based on spot step sizes.
+    3. Auto-fetches nearest active weekly/monthly expiry contract.
+    """
+    try:
+        # Step size mapping
+        step = 100 if symbol in ["SENSEX", "BANKNIFTY", "BANKEX"] else 50
+        
+        # Spot symbol mapping
+        spot_map = {
+            "NIFTY": "NSE:NIFTY 50",
+            "BANKNIFTY": "NSE:NIFTY BANK",
+            "FINNIFTY": "NSE:NIFTY FIN SERVICE",
+            "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
+            "SENSEX": "BSE:SENSEX",
+            "BANKEX": "BSE:BANKEX"
+        }
+        spot_symbol = spot_map.get(symbol, f"NSE:{symbol}")
+        
+        # Fetch Spot Quote and 15M Historical Data for VWAP
+        quotes = kite.quote([spot_symbol])
+        spot_price = quotes.get(spot_symbol, {}).get("last_price", 0.0)
+
+        if spot_price == 0:
+            return None
+
+        to_date = datetime.now()
+        from_date = to_date.replace(hour=9, minute=15, second=0, microsecond=0)
+        spot_candles = kite.historical_data(
+            instrument_token=quotes[spot_symbol]["instrument_token"],
+            from_date=from_date, to_date=to_date, interval="15minute"
+        )
+
+        df_spot = pd.DataFrame(spot_candles)
+        df_spot["tp"] = (df_spot["high"] + df_spot["low"] + df_spot["close"]) / 3.0
+        df_spot["vwap"] = (df_spot["tp"] * df_spot["volume"]).cumsum() / df_spot["volume"].cumsum()
+        
+        latest_vwap = df_spot["vwap"].iloc[-1] if not df_spot.empty else spot_price
+
+        # Determine Reversal Bias
+        if spot_price >= latest_vwap:
+            option_type = "CE"
+            target_strike = (round(spot_price / step) * step) + step
+        else:
+            option_type = "PE"
+            target_strike = (round(spot_price / step) * step) - step
+
+        # Fetch Nearest Expiry Instrument
+        exchange = "BFO" if symbol in ["SENSEX", "BANKEX"] else "NFO"
+        instruments = pd.DataFrame(kite.instruments(exchange))
+
+        filtered = instruments[
+            (instruments["name"] == symbol) &
+            (instruments["strike"] == float(target_strike)) &
+            (instruments["instrument_type"] == option_type)
+        ].copy()
+
+        if filtered.empty:
+            return None
+
+        filtered["expiry"] = pd.to_datetime(filtered["expiry"]).dt.date
+        today = datetime.now().date()
+        valid_contracts = filtered[filtered["expiry"] >= today].sort_values(by="expiry")
+
+        if valid_contracts.empty:
+            return None
+
+        nearest = valid_contracts.iloc[0]
+        return {
+            "symbol": symbol,
+            "option_type": option_type,
+            "strike": target_strike,
+            "tradingsymbol": nearest["tradingsymbol"],
+            "instrument_token": nearest["instrument_token"],
+            "exchange": exchange,
+            "expiry": str(nearest["expiry"]),
+            "spot_price": spot_price,
+            "vwap": latest_vwap
+        }
+    except Exception as e:
+        print(f"Error scanning market: {e}")
+        return None
+
+
+# ==========================================
+# 4. ORDER SUBMISSION & PRE-TRADE GATEKEEPER
 # ==========================================
 class OrderRequest(BaseModel):
     symbol: str
@@ -244,7 +199,80 @@ class OrderRequest(BaseModel):
     price: float
     max_risk_inr: float = 2000.0
 
+
+@app.post("/api/order/submit")
+def submit_automated_order(req: OrderRequest):
+    global DAILY_TRADE_COUNT, DAILY_CUMULATIVE_PNL, LAST_EXIT_TIMESTAMP
+
+    # Gatekeeper 1: Daily Trade Count Limit
+    if DAILY_TRADE_COUNT >= MAX_DAILY_TRADES:
+        raise HTTPException(status_code=400, detail=f"Daily trade limit ({MAX_DAILY_TRADES}) reached! Order blocked.")
+
+    # Gatekeeper 2: Max Loss Floor
+    if DAILY_CUMULATIVE_PNL <= MAX_DAILY_LOSS:
+        raise HTTPException(status_code=400, detail=f"Daily Loss Limit (₹{MAX_DAILY_LOSS}) reached! Bot locked for safety.")
+
+    # Gatekeeper 3: Cooling-Off Timer Check
+    if LAST_EXIT_TIMESTAMP:
+        seconds_elapsed = (datetime.now() - LAST_EXIT_TIMESTAMP).total_seconds()
+        if seconds_elapsed < COOLING_PERIOD_SECONDS:
+            remaining_mins = int(math.ceil((COOLING_PERIOD_SECONDS - seconds_elapsed) / 60.0))
+            raise HTTPException(status_code=400, detail=f"Cooling-off active! Wait {remaining_mins} more minute(s).")
+
+    kite = get_kite_client()
+    if not kite:
+        raise HTTPException(status_code=500, detail="Zerodha API Client Unavailable")
+
+    # Gatekeeper 4: Max Risk Ceiling Verification
+    initial_sl = round(req.price * 0.85, 2)  # Hard 15% Risk Floor
+    projected_risk = (req.price - initial_sl) * req.quantity
+
+    if projected_risk > req.max_risk_inr:
+        raise HTTPException(status_code=400, detail=f"Projected Risk (₹{projected_risk:,.2f}) exceeds Limit (₹{req.max_risk_inr:,.2f})")
+
+    try:
+        # Place MIS Limit Order with 0.5% slippage protection
+        order_id = kite.place_order(
+            variety=kite.VARIETY_REGULAR,
+            exchange=req.exchange,
+            tradingsymbol=req.tradingsymbol,
+            transaction_type=req.transaction_type,
+            quantity=req.quantity,
+            product=kite.PRODUCT_MIS,
+            order_type=kite.ORDER_TYPE_LIMIT,
+            price=round(req.price * 1.005, 2)
+        )
+
+        pos_id = f"{req.tradingsymbol}_{datetime.now().strftime('%H%M%S')}"
+        ACTIVE_POSITIONS[pos_id] = {
+            "order_id": order_id,
+            "tradingsymbol": req.tradingsymbol,
+            "exchange": req.exchange,
+            "instrument_token": req.instrument_token,
+            "side": req.transaction_type,
+            "quantity": req.quantity,
+            "entry_price": req.price,
+            "current_ltp": req.price,
+            "current_sl": initial_sl,
+            "status": "OPEN",
+            "breakeven_locked": False,
+            "profit_20pct_locked": False,
+            "entry_time": datetime.now().strftime("%H:%M:%S")
+        }
+
+        DAILY_TRADE_COUNT += 1
+        TRADE_LOGS.append(
+            f"🟢 [{datetime.now().strftime('%H:%M:%S')}] ORDER FIRED ({DAILY_TRADE_COUNT}/{MAX_DAILY_TRADES}): "
+            f"{req.transaction_type} {req.quantity}x {req.tradingsymbol} @ ₹{req.price}"
+        )
+        return {"status": "SUCCESS", "order_id": order_id, "position_id": pos_id}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def execute_market_exit(pos_id: str, reason: str):
+    """Executes market order exit and triggers cooling-off timer."""
     global LAST_EXIT_TIMESTAMP, DAILY_CUMULATIVE_PNL
     pos = ACTIVE_POSITIONS.get(pos_id)
     if not pos or pos["status"] != "OPEN":
@@ -257,127 +285,138 @@ def execute_market_exit(pos_id: str, reason: str):
     exit_side = kite.TRANSACTION_TYPE_SELL if pos["side"] == "BUY" else kite.TRANSACTION_TYPE_BUY
 
     try:
-        order_id = kite.place_order(
-            variety=kite.VARIETY_REGULAR, exchange=pos["exchange"],
-            tradingsymbol=pos["tradingsymbol"], transaction_type=exit_side,
-            quantity=pos["quantity"], product=kite.PRODUCT_MIS,
+        kite.place_order(
+            variety=kite.VARIETY_REGULAR,
+            exchange=pos["exchange"],
+            tradingsymbol=pos["tradingsymbol"],
+            transaction_type=exit_side,
+            quantity=pos["quantity"],
+            product=kite.PRODUCT_MIS,
             order_type=kite.ORDER_TYPE_MARKET
         )
+
+        realized_pnl = round((pos.get("current_ltp", pos["entry_price"]) - pos["entry_price"]) * pos["quantity"], 2)
         pos["status"] = f"CLOSED ({reason})"
         pos["exit_price"] = pos.get("current_ltp", 0.0)
 
-        realized = pos["unrealized_pnl"]
-        DAILY_CUMULATIVE_PNL += realized
+        DAILY_CUMULATIVE_PNL += realized_pnl
         LAST_EXIT_TIMESTAMP = datetime.now()
 
-        TRADE_LOGS.append(f"🔴 [{datetime.now().strftime('%H:%M:%S')}] AUTO EXIT: {pos['tradingsymbol']} | PnL: ₹{realized} | Reason: {reason}")
-        TRADE_LOGS.append(f"⏳ [{datetime.now().strftime('%H:%M:%S')}] COOLING-OFF TIMER STARTED for {COOLING_PERIOD_SECONDS // 60} minutes.")
+        TRADE_LOGS.append(
+            f"🔴 [{datetime.now().strftime('%H:%M:%S')}] AUTO EXIT: {pos['tradingsymbol']} | "
+            f"PnL: ₹{realized_pnl} | Reason: {reason}"
+        )
+        TRADE_LOGS.append(
+            f"⏳ [{datetime.now().strftime('%H:%M:%S')}] COOLING-OFF TIMER ACTIVATED for {COOLING_PERIOD_SECONDS // 60} mins."
+        )
         return True
     except Exception as e:
         TRADE_LOGS.append(f"❌ [{datetime.now().strftime('%H:%M:%S')}] EXIT FAILED: {str(e)}")
         return False
 
-@app.get("/api/get-symbol")
-def get_auto_symbol(index: str, strike: int, type: str):
-    kite = get_kite_client()
-    if not kite:
-        return {"status": "ERROR", "message": "Zerodha API Unavailable."}
 
-    try:
-        exchange = "BFO" if index in ["SENSEX", "BANKEX"] else "NFO"
-        instruments = kite.instruments(exchange)
+# ==========================================
+# 5. BACKGROUND 4-STAGE EXIT & TRAILING ENGINE
+# ==========================================
+def background_trailing_and_exit_loop():
+    """Runs 24/7 background execution loop evaluating trades every 3 seconds."""
+    while True:
+        try:
+            kite = get_kite_client()
+            if kite and ACTIVE_POSITIONS:
+                for pos_id, pos in list(ACTIVE_POSITIONS.items()):
+                    if pos["status"] != "OPEN":
+                        continue
 
-        matching = [inst for inst in instruments if inst["name"] == index and inst["strike"] == float(strike) and inst["instrument_type"] == type]
-        if not matching:
-            return {"status": "ERROR", "message": f"No contract found for {index} {strike} {type}"}
+                    token = pos["instrument_token"]
+                    entry_price = pos["entry_price"]
+                    current_sl = pos["current_sl"]
+                    breakeven_locked = pos.get("breakeven_locked", False)
+                    profit_20pct_locked = pos.get("profit_20pct_locked", False)
 
-        matching.sort(key=lambda x: x["expiry"])
-        nearest = matching[0]
+                    # Fetch real-time market quote
+                    quote_key = f"{pos['exchange']}:{pos['tradingsymbol']}"
+                    quotes = kite.quote([quote_key])
+                    ltp = quotes.get(quote_key, {}).get("last_price", 0.0)
 
-        return {"status": "SUCCESS", "tradingsymbol": nearest["tradingsymbol"], "instrument_token": nearest["instrument_token"], "expiry": str(nearest["expiry"])}
-    except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
+                    if ltp <= 0:
+                        continue
 
-@app.get("/api/get-token")
-def get_token(symbol: str):
-    kite = get_kite_client()
-    if not kite:
-        return {"status": "ERROR", "instrument_token": 0}
-    try:
-        quotes = kite.quote([f"NFO:{symbol}", f"BFO:{symbol}"])
-        token = list(quotes.values())[0]["instrument_token"]
-        return {"status": "SUCCESS", "instrument_token": token}
-    except Exception:
-        return {"status": "ERROR", "instrument_token": 0}
+                    pos["current_ltp"] = ltp
+                    pnl_pct = (ltp - entry_price) / entry_price
 
-@app.post("/api/order/submit")
-def submit_automated_order(req: OrderRequest):
-    global DAILY_TRADE_COUNT, DAILY_CUMULATIVE_PNL, LAST_EXIT_TIMESTAMP
+                    # -------------------------------------------------------------
+                    # HARD STOP LOSS CHECK (Immediate Exit)
+                    # -------------------------------------------------------------
+                    if ltp <= current_sl:
+                        execute_market_exit(
+                            pos_id,
+                            reason=f"STOP LOSS BREACHED at ₹{ltp} (Active SL: ₹{current_sl})"
+                        )
+                        continue
 
-    if DAILY_TRADE_COUNT >= MAX_DAILY_TRADES:
-        raise HTTPException(status_code=400, detail=f"Daily trade limit ({MAX_DAILY_TRADES}) reached! Order blocked.")
+                    # -------------------------------------------------------------
+                    # STAGE 2: +15% PROFIT -> TRAIL SL TO BUY RATE (BREAKEVEN)
+                    # -------------------------------------------------------------
+                    if pnl_pct >= 0.15 and not breakeven_locked and not profit_20pct_locked:
+                        pos["current_sl"] = entry_price
+                        pos["breakeven_locked"] = True
+                        TRADE_LOGS.append(
+                            f"🛡️ [{datetime.now().strftime('%H:%M:%S')}] +15% GAIN HIT! "
+                            f"SL Raised to Entry Rate (₹{entry_price}) - Risk Eliminated!"
+                        )
 
-    if DAILY_CUMULATIVE_PNL <= MAX_DAILY_LOSS:
-        raise HTTPException(status_code=400, detail=f"Daily Loss Limit (₹{MAX_DAILY_LOSS}) reached! Bot locked for safety.")
+                    # -------------------------------------------------------------
+                    # STAGE 3: +50% PROFIT -> FREEZE +20% PROFIT (1:1.1 R:R)
+                    # -------------------------------------------------------------
+                    if pnl_pct >= 0.50 and not profit_20pct_locked:
+                        target_sl_20pct = round(entry_price * 1.20, 2)
+                        pos["current_sl"] = target_sl_20pct
+                        pos["profit_20pct_locked"] = True
+                        TRADE_LOGS.append(
+                            f"🔥 [{datetime.now().strftime('%H:%M:%S')}] +50% GAIN HIT! "
+                            f"SL Freezed at ₹{target_sl_20pct} (+20% Profit Locked / 1:1.1 R:R Secured)"
+                        )
 
-    if LAST_EXIT_TIMESTAMP:
-        seconds_elapsed = (datetime.now() - LAST_EXIT_TIMESTAMP).total_seconds()
-        if seconds_elapsed < COOLING_PERIOD_SECONDS:
-            remaining_mins = int(math.ceil((COOLING_PERIOD_SECONDS - seconds_elapsed) / 60.0))
-            raise HTTPException(status_code=400, detail=f"Cooling period active! Wait {remaining_mins} more minute(s).")
+                    # -------------------------------------------------------------
+                    # STAGE 4: TREND-RIDING PHASE (3M Candle Close < 9 EMA)
+                    # -------------------------------------------------------------
+                    to_date = datetime.now()
+                    from_date = to_date.replace(hour=9, minute=15, second=0, microsecond=0)
+                    candles = kite.historical_data(
+                        instrument_token=token, from_date=from_date, to_date=to_date, interval="3minute"
+                    )
 
-    kite = get_kite_client()
-    if not kite:
-        raise HTTPException(status_code=500, detail="Zerodha API Client Unavailable")
+                    if not candles or len(candles) < 10:
+                        continue
 
-    initial_sl = round(req.price * 0.85, 2)
-    target_price = round(req.price * 1.40, 2)
-    projected_risk = (req.price - initial_sl) * req.quantity
+                    df_3m = pd.DataFrame(candles)
+                    df_3m["ema_9"] = df_3m["close"].ewm(span=9, adjust=False).mean()
 
-    if projected_risk > req.max_risk_inr:
-        raise HTTPException(status_code=400, detail=f"Projected Risk (₹{projected_risk:,.2f}) exceeds Limit (₹{req.max_risk_inr:,.2f})")
+                    # Evaluate LAST COMPLETED 3-minute candle
+                    last_completed_candle = df_3m.iloc[-2]
+                    latest_close = last_completed_candle["close"]
+                    latest_ema9 = round(last_completed_candle["ema_9"], 2)
 
-    try:
-        order_id = kite.place_order(
-            variety=kite.VARIETY_REGULAR, exchange=req.exchange,
-            tradingsymbol=req.tradingsymbol, transaction_type=req.transaction_type,
-            quantity=req.quantity, product=kite.PRODUCT_MIS,
-            order_type=kite.ORDER_TYPE_LIMIT, price=req.price
-        )
+                    # Active Trend Exit: Only after +20% profit is frozen
+                    if profit_20pct_locked:
+                        if latest_close < latest_ema9:
+                            execute_market_exit(
+                                pos_id,
+                                reason=f"🚀 TREND EXIT: 3M Candle Closed (₹{latest_close}) Below 9 EMA (₹{latest_ema9}) - Trend Ride Complete!"
+                            )
+                            continue
 
-        pos_id = f"{req.tradingsymbol}_{datetime.now().strftime('%H%M%S')}"
-        ACTIVE_POSITIONS[pos_id] = {
-            "order_id": order_id, "tradingsymbol": req.tradingsymbol,
-            "exchange": req.exchange, "instrument_token": req.instrument_token,
-            "side": req.transaction_type, "quantity": req.quantity,
-            "entry_price": req.price, "current_ltp": req.price,
-            "initial_sl": initial_sl, "current_sl": initial_sl,
-            "target_price": target_price, "status": "OPEN",
-            "entry_time": datetime.now().strftime("%H:%M:%S"), "unrealized_pnl": 0.0
-        }
+        except Exception as e:
+            print(f"Error in background execution engine: {e}")
 
-        DAILY_TRADE_COUNT += 1
-        TRADE_LOGS.append(f"🟢 [{datetime.now().strftime('%H:%M:%S')}] ORDER FIRED ({DAILY_TRADE_COUNT}/{MAX_DAILY_TRADES}): {req.transaction_type} {req.quantity}x {req.tradingsymbol} @ ₹{req.price}")
-        return {"status": "SUCCESS", "order_id": order_id, "position_id": pos_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        time.sleep(3)
 
-@app.get("/api/positions")
-def get_active_positions():
-    return ACTIVE_POSITIONS
 
-@app.get("/api/logs")
-def get_logs():
-    return TRADE_LOGS
-
-@app.post("/api/order/panic-exit-all")
-def panic_exit_all():
-    closed_count = 0
-    for pos_id, pos in list(ACTIVE_POSITIONS.items()):
-        if pos["status"] == "OPEN":
-            if execute_market_exit(pos_id, reason="MOBILE PANIC EXIT BUTTON"):
-                closed_count += 1
-    return {"status": "SUCCESS", "closed_positions": closed_count}
+# Start background trailing thread
+import threading
+trailing_thread = threading.Thread(target=background_trailing_and_exit_loop, daemon=True)
+trailing_thread.start()
 
 if __name__ == "__main__":
     import uvicorn
