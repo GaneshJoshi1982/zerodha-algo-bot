@@ -17,7 +17,6 @@ import requests
 # ==========================================
 # 1. CONFIGURATION & ENVIRONMENT SETUP
 # ==========================================
-# Read credentials from Render Environment Variables (or fallback to local defaults)
 API_KEY = os.getenv("API_KEY", "magym2s4yk13gsze")
 API_SECRET = os.getenv("API_SECRET", "83cuxyx91lv9ae371ogcs6ckvu5kto8q")
 USER_ID = os.getenv("ZERODHA_USER_ID", "YOUR_USER_ID")
@@ -26,7 +25,6 @@ TOTP_SECRET = os.getenv("ZERODHA_TOTP_SECRET", "YOUR_TOTP_SECRET_KEY")
 
 TOKEN_FILE = "access_token.txt"
 
-# Regulatory Lot Sizes (Updated for 2026 specifications)
 LOT_SIZES = {
     "NIFTY": 65,
     "BANKNIFTY": 30,
@@ -38,16 +36,16 @@ LOT_SIZES = {
 
 # Overtrading & Risk Protection Caps
 MAX_DAILY_TRADES = 3
-MAX_DAILY_LOSS = -1000.0  # Stop trading if cumulative loss hits ₹1,000
+MAX_DAILY_LOSS = -1000.0  # Circuit breaker at ₹1,000 loss
 DAILY_TRADE_COUNT = 0
 DAILY_CUMULATIVE_PNL = 0.0
 
-# Cooling-Off Period Configurations
+# 15-Minute Cooling-Off Period Settings
 LAST_EXIT_TIMESTAMP = None
-COOLING_PERIOD_SECONDS = 15 * 60  # 15 minutes in seconds
+COOLING_PERIOD_SECONDS = 15 * 60
 
 app = FastAPI(
-    title="Zerodha Institutional LinReg Execution Bot Engine", version="2.5"
+    title="Zerodha Institutional LinReg Execution Bot Engine", version="3.0"
 )
 
 ACTIVE_POSITIONS = {}
@@ -55,7 +53,7 @@ TRADE_LOGS = []
 
 
 def get_kite_client():
-    """Restores the KiteConnect client using the stored access_token."""
+    """Restores the KiteConnect client using stored access_token."""
     kite = KiteConnect(api_key=API_KEY)
     try:
         if os.path.exists(TOKEN_FILE):
@@ -74,12 +72,12 @@ def get_kite_client():
 # ==========================================
 @app.get("/api/auto-login")
 def auto_login_zerodha():
-    """Automates Zerodha's 2FA login flow using PyOTP to generate access_token automatically."""
+    """Automates Zerodha's 2FA login using PyOTP via GET for 1-click browser/app activation."""
     global TRADE_LOGS
     try:
         session = requests.Session()
 
-        # Step 1: Submit Username & Password
+        # Step 1: Submit Credentials
         res1 = session.post(
             "https://kite.zerodha.com/api/login",
             data={"user_id": USER_ID, "password": PASSWORD},
@@ -89,7 +87,7 @@ def auto_login_zerodha():
 
         request_id = res1["data"]["request_id"]
 
-        # Step 2: Auto-Generate 2FA TOTP Code via PyOTP
+        # Step 2: Auto-Generate 2FA TOTP Code
         totp = pyotp.TOTP(TOTP_SECRET)
         twofa_code = totp.now()
 
@@ -104,7 +102,7 @@ def auto_login_zerodha():
         if res2.get("status") != "success":
             raise Exception(f"Phase 2 2FA Failed: {res2}")
 
-        # Step 3: Capture OAuth Redirect Request Token
+        # Step 3: OAuth Redirect Capture
         auth_url = (
             f"https://kite.zerodha.com/connect/login?v=3&api_key={API_KEY}"
         )
@@ -114,11 +112,11 @@ def auto_login_zerodha():
         query_params = parse_qs(parsed_url.query)
 
         if "request_token" not in query_params:
-            raise Exception("Request Token missing in OAuth redirect response.")
+            raise Exception("Request Token missing in OAuth redirect.")
 
         request_token = query_params["request_token"][0]
 
-        # Step 4: Exchange request_token for final Session Access Token
+        # Step 4: Generate Session Access Token
         kite = KiteConnect(api_key=API_KEY)
         session_data = kite.generate_session(
             request_token, api_secret=API_SECRET
@@ -146,7 +144,7 @@ def auto_login_zerodha():
 # 3. LINREG CANDLES & INDICATOR MATH
 # ==========================================
 def calculate_linreg_and_indicators(df_3m, period=11):
-    """Computes Linear Regression Candles (LinReg) & 3M EMA-9 to eliminate false wicks."""
+    """Computes Linear Regression Candles & 3M EMA-9 to eliminate false wicks."""
     if df_3m is None or df_3m.empty or len(df_3m) < period:
         return 0.0, 0.0, 0.0
 
@@ -159,18 +157,15 @@ def calculate_linreg_and_indicators(df_3m, period=11):
         slope, intercept = np.polyfit(x, series, 1)
         return slope * (period - 1) + intercept
 
-    # Linear Regression Smoothed Values
     df["lr_close"] = (
         df["close"].rolling(window=period).apply(linreg_val, raw=False)
     )
     df["lr_open"] = (
         df["open"].rolling(window=period).apply(linreg_val, raw=False)
     )
-
-    # 3-Min EMA-9 Calculation
     df["ema_9"] = df["close"].ewm(span=9, adjust=False).mean()
 
-    latest_lr_close = round(df["lr_close"].iloc[-2], 2)  # Last completed candle
+    latest_lr_close = round(df["lr_close"].iloc[-2], 2)
     latest_lr_open = round(df["lr_open"].iloc[-2], 2)
     latest_ema9 = round(df["ema_9"].iloc[-2], 2)
 
@@ -195,7 +190,6 @@ def background_trailing_loop():
                     exchange = pos["exchange"]
                     token = pos["instrument_token"]
 
-                    # Fetch live tick quote
                     quote_key = f"{exchange}:{tradingsymbol}"
                     quotes = kite.quote([quote_key])
                     ltp = quotes.get(quote_key, {}).get("last_price", 0.0)
@@ -240,7 +234,6 @@ def background_trailing_loop():
                             calculate_linreg_and_indicators(df_3m)
                         )
 
-                        # Trail SL higher when EMA-9 moves above initial SL
                         if (
                             ema9_val > pos["current_sl"]
                             and ltp > pos["entry_price"]
@@ -250,7 +243,6 @@ def background_trailing_loop():
                                 f"📈 [{datetime.now().strftime('%H:%M:%S')}] TRAILING SL RAISED to ₹{ema9_val} for {tradingsymbol}"
                             )
 
-                        # Exit on LinReg Candle Close Below EMA-9 (Filters false tick wicks)
                         if (
                             lr_close < ema9_val
                             and ema9_val > pos["entry_price"]
@@ -315,11 +307,8 @@ def execute_market_exit(pos_id: str, reason: str):
         pos["status"] = f"CLOSED ({reason})"
         pos["exit_price"] = pos.get("current_ltp", 0.0)
 
-        # Update Daily PnL Tracking
         realized = pos["unrealized_pnl"]
         DAILY_CUMULATIVE_PNL += realized
-
-        # Set Exit Timestamp to Trigger 15-Minute Cooling Period
         LAST_EXIT_TIMESTAMP = datetime.now()
 
         TRADE_LOGS.append(
@@ -338,7 +327,7 @@ def execute_market_exit(pos_id: str, reason: str):
 
 @app.get("/api/get-symbol")
 def get_auto_symbol(index: str, strike: int, type: str):
-    """Dynamically resolves the active nearest contract symbol and instrument token."""
+    """Dynamically resolves the active contract symbol and instrument token."""
     kite = get_kite_client()
     if not kite:
         return {"status": "ERROR", "message": "Zerodha API Unavailable."}
@@ -376,7 +365,6 @@ def get_auto_symbol(index: str, strike: int, type: str):
 
 @app.get("/api/get-token")
 def get_token(symbol: str):
-    """Fetches numerical token ID for an option trading symbol."""
     kite = get_kite_client()
     if not kite:
         return {"status": "ERROR", "instrument_token": 0}
@@ -392,21 +380,18 @@ def get_token(symbol: str):
 def submit_automated_order(req: OrderRequest):
     global DAILY_TRADE_COUNT, DAILY_CUMULATIVE_PNL, LAST_EXIT_TIMESTAMP
 
-    # 1. Overtrading Protection: Max Daily Trades Cap
     if DAILY_TRADE_COUNT >= MAX_DAILY_TRADES:
         raise HTTPException(
             status_code=400,
-            detail=f"Daily trade limit ({MAX_DAILY_TRADES}) reached! Order blocked to prevent overtrading.",
+            detail=f"Daily trade limit ({MAX_DAILY_TRADES}) reached! Order blocked.",
         )
 
-    # 2. Risk Safeguard: Daily Max Loss Circuit Breaker
     if DAILY_CUMULATIVE_PNL <= MAX_DAILY_LOSS:
         raise HTTPException(
             status_code=400,
             detail=f"Daily Loss Limit (₹{MAX_DAILY_LOSS}) reached! Bot locked for safety.",
         )
 
-    # 3. Cooling-Off Period Check
     if LAST_EXIT_TIMESTAMP:
         seconds_elapsed = (
             datetime.now() - LAST_EXIT_TIMESTAMP
@@ -417,7 +402,7 @@ def submit_automated_order(req: OrderRequest):
             )
             raise HTTPException(
                 status_code=400,
-                detail=f"Cooling period active! Please wait {remaining_mins} more minute(s) before entering a new trade.",
+                detail=f"Cooling period active! Wait {remaining_mins} more minute(s).",
             )
 
     kite = get_kite_client()
