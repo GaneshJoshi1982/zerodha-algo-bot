@@ -2,6 +2,9 @@ import requests
 import streamlit as st
 
 BACKEND_URL = "https://zerodha-algo-bot-vb36.onrender.com"
+LOGIN_URL = (
+    "https://kite.zerodha.com/connect/login?v=3&api_key=magym2s4yk13gsze"
+)
 
 st.set_page_config(
     page_title="Mobile Bot Control Center", page_icon="📱", layout="centered"
@@ -16,7 +19,6 @@ bot_status = "RED"
 status_message = "Offline / Disconnected"
 
 try:
-    # Ping backend positions endpoint to verify Zerodha API connection
     res = requests.get(f"{BACKEND_URL}/api/positions", timeout=4)
     if res.status_code == 200:
         bot_status = "GREEN"
@@ -26,7 +28,6 @@ try:
 except Exception:
     status_message = "Backend Engine Offline / Waking Up..."
 
-# Render Visual Signal Light Banner
 if bot_status == "GREEN":
     st.success(f"🟢 **SYSTEM STATUS: {status_message}**")
 else:
@@ -37,28 +38,22 @@ st.caption(
 )
 
 # ==========================================
-# 2. 2FA AUTO-LOGIN & PANIC CONTROLS
+# 2. 1-CLICK MORNING LOGIN & PANIC CONTROLS
 # ==========================================
 st.markdown("---")
 col_login, col_panic = st.columns(2)
 
 with col_login:
-    if st.button(
-        "🔑 AUTO-LOGIN ZERODHA", type="secondary", use_container_width=True
-    ):
-        try:
-            res = requests.get(f"{BACKEND_URL}/api/auto-login").json()
-            if res.get("status") == "SUCCESS":
-                st.success("✅ Today's Token Generated!")
-                st.rerun()
-            else:
-                st.error(f"❌ Login Error: {res.get('error')}")
-        except Exception as e:
-            st.error(f"Backend Server Offline: {e}")
+    st.link_button(
+        "🔑 1-CLICK ZERODHA LOGIN",
+        url=LOGIN_URL,
+        type="primary",
+        use_container_width=True,
+    )
 
 with col_panic:
     if st.button(
-        "🚨 PANIC EXIT ALL", type="primary", use_container_width=True
+        "🚨 PANIC EXIT ALL", type="secondary", use_container_width=True
     ):
         try:
             res = requests.post(
