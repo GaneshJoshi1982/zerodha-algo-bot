@@ -4,7 +4,7 @@ import math
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from kiteconnect import KiteConnect
 
@@ -55,7 +55,7 @@ def get_kite_client():
 
 
 # ==========================================
-# 2. AUTHENTICATION & LOGIN ENDPOINTS
+# 2. FIXED AUTHENTICATION & LOGIN ENDPOINTS
 # ==========================================
 @app.get("/api/get-access-token")
 def get_access_token():
@@ -88,11 +88,18 @@ def set_request_token(request_token: str):
 
 
 @app.get("/api/auto-login")
-def auto_login_zerodha(request_token: str = None):
-    """Handles Zerodha callback redirect from 1-CLICK ZERODHA LOGIN button."""
-    if request_token:
-        return set_request_token(request_token)
-    return {"status": "FAILED", "error": "No request_token received in callback URL"}
+def auto_login_zerodha(request: Request):
+    """
+    Catches all query parameters sent back by Zerodha redirect callback
+    URL: /api/auto-login?action=login&type=login&status=success&request_token=xxxx
+    """
+    params = dict(request.query_params)
+    req_token = params.get("request_token")
+    
+    if req_token:
+        return set_request_token(req_token)
+    
+    return {"status": "FAILED", "error": f"No request_token found in callback parameters: {params}"}
 
 
 # ==========================================
