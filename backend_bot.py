@@ -72,7 +72,7 @@ def get_kite_client():
 # ==========================================
 # 2. AUTOMATED DAILY 2FA LOGIN SYSTEM
 # ==========================================
-@app.post("/api/auto-login")
+@app.get("/api/auto-login")
 def auto_login_zerodha():
     """Automates Zerodha's 2FA login flow using PyOTP to generate access_token automatically."""
     global TRADE_LOGS
