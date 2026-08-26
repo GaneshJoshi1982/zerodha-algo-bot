@@ -8,12 +8,36 @@ st.set_page_config(
 )
 
 st.title("📱 Mobile Algo Bot Control Center")
+
+# ==========================================
+# 1. LIVE SYSTEM STATUS SIGNAL LIGHT
+# ==========================================
+bot_status = "RED"
+status_message = "Offline / Disconnected"
+
+try:
+    # Ping backend positions endpoint to verify Zerodha API connection
+    res = requests.get(f"{BACKEND_URL}/api/positions", timeout=4)
+    if res.status_code == 200:
+        bot_status = "GREEN"
+        status_message = "LIVE & CONNECTED TO ZERODHA"
+    else:
+        status_message = "Token Expired / Zerodha API Error"
+except Exception:
+    status_message = "Backend Engine Offline / Waking Up..."
+
+# Render Visual Signal Light Banner
+if bot_status == "GREEN":
+    st.success(f"🟢 **SYSTEM STATUS: {status_message}**")
+else:
+    st.error(f"🔴 **SYSTEM STATUS: {status_message}**")
+
 st.caption(
-    "Connected to Cloud Backend Engine | LinReg 3M + VWAP Auto-Trailing Active"
+    "LinReg 3M + VWAP Auto-Trailing Active | Auto-Risk Circuit Breaker Enabled"
 )
 
 # ==========================================
-# 1. 2FA AUTO-LOGIN & PANIC CONTROLS
+# 2. 2FA AUTO-LOGIN & PANIC CONTROLS
 # ==========================================
 st.markdown("---")
 col_login, col_panic = st.columns(2)
@@ -26,6 +50,7 @@ with col_login:
             res = requests.get(f"{BACKEND_URL}/api/auto-login").json()
             if res.get("status") == "SUCCESS":
                 st.success("✅ Today's Token Generated!")
+                st.rerun()
             else:
                 st.error(f"❌ Login Error: {res.get('error')}")
         except Exception as e:
@@ -42,11 +67,12 @@ with col_panic:
             st.success(
                 f"Panic Exit Fired! Closed {res.get('closed_positions', 0)} positions."
             )
+            st.rerun()
         except Exception as e:
             st.error(f"Panic Error: {e}")
 
 # ==========================================
-# 2. ACTIVE POSITIONS & LIVE P&L
+# 3. ACTIVE POSITIONS & LIVE P&L
 # ==========================================
 st.markdown("---")
 st.subheader("📊 Active Automated Positions")
@@ -84,11 +110,11 @@ try:
         st.info("No active open positions monitored by backend.")
 except Exception:
     st.warning(
-        "⚠️ Waiting for backend server connection or valid Zerodha API session... Click Auto-Login above!"
+        "⚠️ Waiting for backend server connection... If Red status persists, perform morning login."
     )
 
 # ==========================================
-# 3. FULLY AUTOMATED TRADE ENTRY OVERRIDE
+# 4. MANUAL ORDER ENTRY
 # ==========================================
 st.markdown("---")
 st.subheader("⚡ Fire Manual Scalp Order")
@@ -114,14 +140,13 @@ strike_price = col_strike.number_input(
     "Strike Price", value=default_strike, step=100
 )
 
-# Auto-Fetch Symbol & Token from Backend API
 auto_symbol = ""
 auto_token = 0
 expiry_info = ""
 
 try:
     url = f"{BACKEND_URL}/api/get-symbol?index={symbol}&strike={int(strike_price)}&type={opt_type}"
-    res = requests.get(url).json()
+    res = requests.get(url, timeout=3).json()
     if res.get("status") == "SUCCESS":
         auto_symbol = res.get("tradingsymbol")
         auto_token = res.get("instrument_token")
@@ -162,18 +187,19 @@ if st.button("🚀 SUBMIT ORDER TO BOT", type="primary", use_container_width=Tru
         res = requests.post(f"{BACKEND_URL}/api/order/submit", json=payload)
         if res.status_code == 200:
             st.success("✅ Order Transmitted to Cloud Engine!")
+            st.rerun()
         else:
             st.error(f"❌ Rejected: {res.json().get('detail')}")
     except Exception as e:
         st.error(f"Execution Error: {e}")
 
 # ==========================================
-# 4. SYSTEM AUDIT LOGS
+# 5. SYSTEM AUDIT LOGS
 # ==========================================
 st.markdown("---")
 st.subheader("📋 System Audit Logs")
 try:
-    logs = requests.get(f"{BACKEND_URL}/api/logs").json()
+    logs = requests.get(f"{BACKEND_URL}/api/logs", timeout=3).json()
     if logs:
         st.text_area(
             "Live Log Output", value="\n".join(reversed(logs)), height=150
