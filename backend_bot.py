@@ -55,7 +55,48 @@ def get_kite_client():
 
 
 # ==========================================
-# 2. INDICATOR ENGINE: RSI(9) & EMA(3) CROSS
+# 2. AUTHENTICATION & LOGIN ENDPOINTS
+# ==========================================
+@app.get("/api/get-access-token")
+def get_access_token():
+    """Returns the active access token stored in access_token.txt."""
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, "r") as f:
+            token = f.read().strip()
+        if token:
+            return {"status": "SUCCESS", "access_token": token}
+    return {"status": "ERROR", "message": "No active access token stored yet."}
+
+
+@app.get("/api/set-request-token")
+def set_request_token(request_token: str):
+    """Exchanges request_token for a 24-hour access_token."""
+    global TRADE_LOGS
+    try:
+        kite = KiteConnect(api_key=API_KEY)
+        session_data = kite.generate_session(request_token, api_secret=API_SECRET)
+        access_token = session_data["access_token"]
+        
+        with open(TOKEN_FILE, "w") as f:
+            f.write(access_token)
+            
+        msg = f"🔑 [{datetime.now().strftime('%H:%M:%S')}] SESSION TOKEN SET SUCCESSFULLY!"
+        TRADE_LOGS.append(msg)
+        return {"status": "SUCCESS", "message": "Token active for 24 hours!", "access_token": access_token}
+    except Exception as e:
+        return {"status": "FAILED", "error": str(e)}
+
+
+@app.get("/api/auto-login")
+def auto_login_zerodha(request_token: str = None):
+    """Handles Zerodha callback redirect from 1-CLICK ZERODHA LOGIN button."""
+    if request_token:
+        return set_request_token(request_token)
+    return {"status": "FAILED", "error": "No request_token received in callback URL"}
+
+
+# ==========================================
+# 3. INDICATOR ENGINE: RSI(9) & EMA(3) CROSS
 # ==========================================
 def calculate_rsi(series, period=9):
     delta = series.diff()
@@ -97,7 +138,7 @@ def check_hm_reversal_signal(df_3m):
 
 
 # ==========================================
-# 3. SCANNING & REVERSAL STRIKE SELECTION
+# 4. SCANNING & REVERSAL STRIKE SELECTION
 # ==========================================
 def scan_and_select_strike(kite, symbol: str):
     """
@@ -107,10 +148,8 @@ def scan_and_select_strike(kite, symbol: str):
     3. Auto-fetches nearest active weekly/monthly expiry contract.
     """
     try:
-        # Step size mapping
         step = 100 if symbol in ["SENSEX", "BANKNIFTY", "BANKEX"] else 50
         
-        # Spot symbol mapping
         spot_map = {
             "NIFTY": "NSE:NIFTY 50",
             "BANKNIFTY": "NSE:NIFTY BANK",
@@ -121,7 +160,6 @@ def scan_and_select_strike(kite, symbol: str):
         }
         spot_symbol = spot_map.get(symbol, f"NSE:{symbol}")
         
-        # Fetch Spot Quote and 15M Historical Data for VWAP
         quotes = kite.quote([spot_symbol])
         spot_price = quotes.get(spot_symbol, {}).get("last_price", 0.0)
 
@@ -187,7 +225,7 @@ def scan_and_select_strike(kite, symbol: str):
 
 
 # ==========================================
-# 4. ORDER SUBMISSION & PRE-TRADE GATEKEEPER
+# 5. ORDER SUBMISSION & PRE-TRADE GATEKEEPER
 # ==========================================
 class OrderRequest(BaseModel):
     symbol: str
@@ -316,7 +354,7 @@ def execute_market_exit(pos_id: str, reason: str):
 
 
 # ==========================================
-# 5. BACKGROUND 4-STAGE EXIT & TRAILING ENGINE
+# 6. BACKGROUND 4-STAGE EXIT & TRAILING ENGINE
 # ==========================================
 def background_trailing_and_exit_loop():
     """Runs 24/7 background execution loop evaluating trades every 3 seconds."""
