@@ -14,6 +14,8 @@ from kiteconnect import KiteConnect
 # ==========================================
 API_KEY = os.getenv("API_KEY", "your_api_key")
 API_SECRET = os.getenv("API_SECRET", "your_api_secret")
+# Add your dedicated static proxy URL in Render env vars as PROXY_URL (optional)
+PROXY_URL = os.getenv("PROXY_URL", None)  # Format: "http://user:pass@host:port"
 TOKEN_FILE = "access_token.txt"
 
 LOT_SIZES = {
@@ -31,6 +33,7 @@ MAX_DAILY_LOSS = -1000.0
 COOLING_PERIOD_SECONDS = 15 * 60  # 15 minutes cooling-off timer
 
 # Runtime State Tracking
+GLOBAL_ACCESS_TOKEN = None
 DAILY_TRADE_COUNT = 0
 DAILY_CUMULATIVE_PNL = 0.0
 LAST_EXIT_TIMESTAMP = None
@@ -41,13 +44,21 @@ app = FastAPI(title="Institutional LinReg & HM Execution Engine", version="5.0")
 
 
 def get_kite_client():
-    """Restores active Kite Connect session from token file."""
-    kite = KiteConnect(api_key=API_KEY)
+    """Restores active Kite Connect session with proxy support."""
+    global GLOBAL_ACCESS_TOKEN
+    
+    # Configure proxy dict if PROXY_URL environment variable is set
+    proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+    kite = KiteConnect(api_key=API_KEY, proxies=proxies)
+    
     try:
-        if os.path.exists(TOKEN_FILE):
+        token_to_use = GLOBAL_ACCESS_TOKEN
+        if not token_to_use and os.path.exists(TOKEN_FILE):
             with open(TOKEN_FILE, "r") as f:
-                token = f.read().strip()
-            kite.set_access_token(token)
+                token_to_use = f.read().strip()
+                
+        if token_to_use:
+            kite.set_access_token(token_to_use)
             return kite
         return None
     except Exception as e:
@@ -60,11 +71,15 @@ def get_kite_client():
 # ==========================================
 @app.get("/api/get-access-token")
 def get_access_token():
-    """Returns the active access token stored in access_token.txt."""
+    """Returns the active access token stored in memory or file."""
+    global GLOBAL_ACCESS_TOKEN
+    if GLOBAL_ACCESS_TOKEN:
+        return {"status": "SUCCESS", "access_token": GLOBAL_ACCESS_TOKEN}
     if os.path.exists(TOKEN_FILE):
         with open(TOKEN_FILE, "r") as f:
             token = f.read().strip()
         if token:
+            GLOBAL_ACCESS_TOKEN = token
             return {"status": "SUCCESS", "access_token": token}
     return {"status": "ERROR", "message": "No active access token stored yet."}
 
@@ -72,12 +87,14 @@ def get_access_token():
 @app.get("/api/set-request-token")
 def set_request_token(request_token: str):
     """Exchanges request_token for a 24-hour access_token."""
-    global TRADE_LOGS
+    global TRADE_LOGS, GLOBAL_ACCESS_TOKEN
     try:
-        kite = KiteConnect(api_key=API_KEY)
+        proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+        kite = KiteConnect(api_key=API_KEY, proxies=proxies)
         session_data = kite.generate_session(request_token, api_secret=API_SECRET)
         access_token = session_data["access_token"]
         
+        GLOBAL_ACCESS_TOKEN = access_token
         with open(TOKEN_FILE, "w") as f:
             f.write(access_token)
             
@@ -177,10 +194,6 @@ def calculate_rsi(series, period=9):
 
 
 def check_hm_reversal_signal(df_3m):
-    """
-    Evaluates 3M Hilega-Milega (HM) logic:
-    RSI(9) crossing above EMA(3) of RSI with Volume confirmation.
-    """
     if df_3m is None or df_3m.empty or len(df_3m) < 20:
         return False, "⚪ Insufficient Candle Data"
 
@@ -205,10 +218,6 @@ def check_hm_reversal_signal(df_3m):
 
 
 def scan_and_select_strike(kite, symbol: str):
-    """
-    Scans live market conditions for mid-day reversals against 15M VWAP
-    and fetches nearest active option contract.
-    """
     try:
         step = 100 if symbol in ["SENSEX", "BANKNIFTY", "BANKEX"] else 50
         spot_map = {
@@ -366,7 +375,6 @@ def submit_automated_order(req: OrderRequest):
 
 
 def execute_market_exit(pos_id: str, reason: str):
-    """Executes market order exit and triggers cooling-off timer."""
     global LAST_EXIT_TIMESTAMP, DAILY_CUMULATIVE_PNL
     pos = ACTIVE_POSITIONS.get(pos_id)
     if not pos or pos["status"] != "OPEN":
@@ -453,7 +461,7 @@ def background_market_scanner_loop():
         except Exception as e:
             print(f"Error in scanner loop: {e}")
 
-        time.sleep(180)  # Scan every 3 minutes
+        time.sleep(180)
 
 
 # ==========================================
@@ -524,7 +532,7 @@ def background_trailing_and_exit_loop():
         time.sleep(3)
 
 
-# Start both background threads
+# Start background threads
 threading.Thread(target=background_market_scanner_loop, daemon=True).start()
 threading.Thread(target=background_trailing_and_exit_loop, daemon=True).start()
 
