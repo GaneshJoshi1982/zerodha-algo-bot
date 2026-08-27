@@ -3,6 +3,7 @@ import time
 import math
 import numpy as np
 import pandas as pd
+import threading
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
@@ -163,7 +164,7 @@ def get_symbol_details(index: str, strike: int, type: str):
 
 
 # ==========================================
-# 4. INDICATOR ENGINE & REVERSAL LOGIC
+# 4. INDICATOR ENGINE & REVERSAL SCANNER
 # ==========================================
 def calculate_rsi(series, period=9):
     delta = series.diff()
@@ -173,6 +174,113 @@ def calculate_rsi(series, period=9):
     avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
+
+
+def check_hm_reversal_signal(df_3m):
+    """
+    Evaluates 3M Hilega-Milega (HM) logic:
+    RSI(9) crossing above EMA(3) of RSI with Volume confirmation.
+    """
+    if df_3m is None or df_3m.empty or len(df_3m) < 20:
+        return False, "⚪ Insufficient Candle Data"
+
+    df = df_3m.copy()
+    df["rsi_9"] = calculate_rsi(df["close"], period=9)
+    df["rsi_ema_3"] = df["rsi_9"].ewm(span=3, adjust=False).mean()
+    df["vol_avg20"] = df["volume"].rolling(20).mean()
+
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    rsi_gt_ema3 = latest["rsi_9"] > latest["rsi_ema_3"]
+    fresh_cross = (prev["rsi_9"] <= prev["rsi_ema_3"]) and rsi_gt_ema3
+    vol_surge = latest["volume"] >= (1.2 * latest["vol_avg20"])
+
+    if fresh_cross and vol_surge:
+        return True, f"🚀 FRESH HM CROSS: RSI(9) [{round(latest['rsi_9'], 1)}] > EMA(3) + Vol Surge"
+    elif rsi_gt_ema3 and vol_surge:
+        return True, f"🟢 HM CONTINUATION: Holding RSI(9) > EMA(3)"
+
+    return False, "⚪ No Signal"
+
+
+def scan_and_select_strike(kite, symbol: str):
+    """
+    Scans live market conditions for mid-day reversals against 15M VWAP
+    and fetches nearest active option contract.
+    """
+    try:
+        step = 100 if symbol in ["SENSEX", "BANKNIFTY", "BANKEX"] else 50
+        spot_map = {
+            "NIFTY": "NSE:NIFTY 50",
+            "BANKNIFTY": "NSE:NIFTY BANK",
+            "FINNIFTY": "NSE:NIFTY FIN SERVICE",
+            "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
+            "SENSEX": "BSE:SENSEX",
+            "BANKEX": "BSE:BANKEX"
+        }
+        spot_symbol = spot_map.get(symbol, f"NSE:{symbol}")
+        
+        quotes = kite.quote([spot_symbol])
+        spot_price = quotes.get(spot_symbol, {}).get("last_price", 0.0)
+
+        if spot_price == 0:
+            return None
+
+        to_date = datetime.now()
+        from_date = to_date.replace(hour=9, minute=15, second=0, microsecond=0)
+        spot_candles = kite.historical_data(
+            instrument_token=quotes[spot_symbol]["instrument_token"],
+            from_date=from_date, to_date=to_date, interval="15minute"
+        )
+
+        df_spot = pd.DataFrame(spot_candles)
+        df_spot["tp"] = (df_spot["high"] + df_spot["low"] + df_spot["close"]) / 3.0
+        df_spot["vwap"] = (df_spot["tp"] * df_spot["volume"]).cumsum() / df_spot["volume"].cumsum()
+        
+        latest_vwap = df_spot["vwap"].iloc[-1] if not df_spot.empty else spot_price
+
+        if spot_price >= latest_vwap:
+            option_type = "CE"
+            target_strike = (round(spot_price / step) * step) + step
+        else:
+            option_type = "PE"
+            target_strike = (round(spot_price / step) * step) - step
+
+        exchange = "BFO" if symbol in ["SENSEX", "BANKEX"] else "NFO"
+        instruments = pd.DataFrame(kite.instruments(exchange))
+
+        filtered = instruments[
+            (instruments["name"] == symbol) &
+            (instruments["strike"] == float(target_strike)) &
+            (instruments["instrument_type"] == option_type)
+        ].copy()
+
+        if filtered.empty:
+            return None
+
+        filtered["expiry"] = pd.to_datetime(filtered["expiry"]).dt.date
+        today = datetime.now().date()
+        valid_contracts = filtered[filtered["expiry"] >= today].sort_values(by="expiry")
+
+        if valid_contracts.empty:
+            return None
+
+        nearest = valid_contracts.iloc[0]
+        return {
+            "symbol": symbol,
+            "option_type": option_type,
+            "strike": target_strike,
+            "tradingsymbol": nearest["tradingsymbol"],
+            "instrument_token": nearest["instrument_token"],
+            "exchange": exchange,
+            "expiry": str(nearest["expiry"]),
+            "spot_price": spot_price,
+            "vwap": latest_vwap
+        }
+    except Exception as e:
+        print(f"Error scanning market: {e}")
+        return None
 
 
 # ==========================================
@@ -193,7 +301,6 @@ class OrderRequest(BaseModel):
 def submit_automated_order(req: OrderRequest):
     global DAILY_TRADE_COUNT, DAILY_CUMULATIVE_PNL, LAST_EXIT_TIMESTAMP
 
-    # Circuit Breakers
     if DAILY_TRADE_COUNT >= MAX_DAILY_TRADES:
         raise HTTPException(status_code=400, detail=f"Daily trade limit ({MAX_DAILY_TRADES}) reached!")
 
@@ -300,7 +407,57 @@ def execute_market_exit(pos_id: str, reason: str):
 
 
 # ==========================================
-# 6. BACKGROUND 4-STAGE EXIT & TRAILING ENGINE
+# 6. BACKGROUND ENGINE: AUTOMATED SCANNER
+# ==========================================
+def background_market_scanner_loop():
+    """Scans market symbols every 3 minutes for automated entries."""
+    SYMBOLS_TO_SCAN = ["NIFTY", "BANKNIFTY"]
+    
+    while True:
+        try:
+            kite = get_kite_client()
+            if kite and DAILY_TRADE_COUNT < MAX_DAILY_TRADES and len(ACTIVE_POSITIONS) == 0:
+                for symbol in SYMBOLS_TO_SCAN:
+                    strike_data = scan_and_select_strike(kite, symbol)
+                    if not strike_data:
+                        continue
+
+                    token = strike_data["instrument_token"]
+                    to_date = datetime.now()
+                    from_date = to_date.replace(hour=9, minute=15, second=0, microsecond=0)
+                    candles = kite.historical_data(instrument_token=token, from_date=from_date, to_date=to_date, interval="3minute")
+                    
+                    if not candles:
+                        continue
+                        
+                    df_3m = pd.DataFrame(candles)
+                    has_signal, reason = check_hm_reversal_signal(df_3m)
+
+                    if has_signal:
+                        ltp = df_3m.iloc[-1]["close"]
+                        lot_size = LOT_SIZES.get(symbol, 50)
+                        
+                        req = OrderRequest(
+                            symbol=symbol,
+                            exchange=strike_data["exchange"],
+                            tradingsymbol=strike_data["tradingsymbol"],
+                            instrument_token=token,
+                            transaction_type="BUY",
+                            quantity=lot_size,
+                            price=ltp,
+                            max_risk_inr=2000.0
+                        )
+                        submit_automated_order(req)
+                        break
+
+        except Exception as e:
+            print(f"Error in scanner loop: {e}")
+
+        time.sleep(180)  # Scan every 3 minutes
+
+
+# ==========================================
+# 7. BACKGROUND ENGINE: 4-STAGE EXIT LOOP
 # ==========================================
 def background_trailing_and_exit_loop():
     while True:
@@ -367,9 +524,9 @@ def background_trailing_and_exit_loop():
         time.sleep(3)
 
 
-import threading
-trailing_thread = threading.Thread(target=background_trailing_and_exit_loop, daemon=True)
-trailing_thread.start()
+# Start both background threads
+threading.Thread(target=background_market_scanner_loop, daemon=True).start()
+threading.Thread(target=background_trailing_and_exit_loop, daemon=True).start()
 
 if __name__ == "__main__":
     import uvicorn
