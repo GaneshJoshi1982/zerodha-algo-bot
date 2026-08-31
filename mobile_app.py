@@ -90,7 +90,7 @@ st.divider()
 # 3. Tabbed Interface Navigation
 # ------------------------------------------------------------------------------
 tab1, tab2, tab3 = st.tabs(
-    ["⚙️ Strategy Controls", "📊 Live Positions & Trade Log", "📋 System Audit Logs"]
+    ["⚙️ Strategy Controls", "🚀 Push Manual Trade", "📋 System Audit Logs"]
 )
 
 with tab1:
@@ -101,24 +101,77 @@ with tab1:
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
         if st.button("🚨 Emergency Square Off All", type="primary"):
-            st.warning("Square off signal issued to backend.")
+            try:
+                sq_res = requests.post(
+                    f"{BACKEND_URL}/square_off", timeout=5
+                ).json()
+                st.warning(
+                    f"Square off status: {sq_res.get('message', 'Signal Sent')}"
+                )
+            except Exception as e:
+                st.error(f"Failed to execute square off: {e}")
+
     with col_btn2:
         if st.button("🔄 Sync Account & Margins"):
-            st.info("Syncing positions with Zerodha...")
+            with st.spinner("Syncing with Zerodha..."):
+                try:
+                    sync_res = requests.get(
+                        f"{BACKEND_URL}/sync", timeout=5
+                    ).json()
+                    st.success(
+                        f"Synced! Available Margin: ₹{sync_res.get('margin', 'N/A')}"
+                    )
+                except Exception as e:
+                    st.error(f"Sync failed: {e}")
 
 with tab2:
-    st.subheader("Real-Time Positions & Order History")
-    st.info("No active open positions for today's session.")
+    st.subheader("🚀 Push Manual Signal / Instant Trade")
+    with st.form("push_trade_form"):
+        col_t1, col_t2 = st.columns(2)
+        with col_t1:
+            symbol = st.selectbox(
+                "Select Index / Asset", ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+            )
+            transaction_type = st.radio(
+                "Transaction Type", ["BUY", "SELL"], horizontal=True
+            )
+        with col_t2:
+            quantity = st.number_input(
+                "Quantity (Lots/Units)", min_value=1, value=15, step=1
+            )
+            order_type = st.selectbox("Order Type", ["MARKET", "LIMIT"])
+
+        price = 0.0
+        if order_type == "LIMIT":
+            price = st.number_input("Limit Price", min_value=0.0, value=100.0)
+
+        submit_trade = st.form_submit_button(
+            "⚡ Push Trade Order to Market", type="primary"
+        )
+
+        if submit_trade:
+            payload = {
+                "symbol": symbol,
+                "transaction_type": transaction_type,
+                "quantity": quantity,
+                "order_type": order_type,
+                "price": price,
+            }
+            try:
+                trade_res = requests.post(
+                    f"{BACKEND_URL}/push_trade", json=payload, timeout=5
+                ).json()
+                st.success(
+                    f"✅ Order Placed Successfully! Order ID: {trade_res.get('order_id', 'N/A')}"
+                )
+            except Exception as e:
+                st.error(f"❌ Failed to push trade: {e}")
 
 with tab3:
     st.subheader("System Event Logs")
-    st.code(
-        """
-[SYSTEM LOGS]
-- 08:30:00 - Backend engine initiated on 92.4.85.1:10000
-- 12:33:58 - Uvicorn server started successfully
-- OAuth Token validated via /callback
-- Connection state: ACTIVE
-    """,
-        language="text",
-    )
+    if st.button("Refresh Logs"):
+        try:
+            logs_res = requests.get(f"{BACKEND_URL}/logs", timeout=3).json()
+            st.code(logs_res.get("logs", "No logs found"), language="text")
+        except Exception as e:
+            st.error(f"Failed to load logs: {e}")
