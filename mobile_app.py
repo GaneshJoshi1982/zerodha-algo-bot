@@ -14,25 +14,28 @@ st.set_page_config(
 )
 st.title("⚡ Zerodha Algorithmic Trading Terminal")
 
-# Handle request token cleanly with session state flag
-if "request_token" in st.query_params and not st.session_state.get(
-    "authenticated"
-):
+# Process incoming token if redirected from Zerodha
+if "request_token" in st.query_params:
     token = st.query_params["request_token"]
+    st.info("🔄 Processing Zerodha Authentication...")
+
     try:
         res = requests.get(
             f"{BACKEND_URL}/callback",
             params={"request_token": token},
-            timeout=5,
+            timeout=10,
         )
+        st.query_params.clear()
         if res.status_code == 200:
-            st.session_state["authenticated"] = True
-            st.query_params.clear()
+            st.success("✅ Connected successfully!")
             st.rerun()
+        else:
+            st.error(f"❌ Authentication Error: {res.text}")
     except Exception as e:
         st.query_params.clear()
+        st.error(f"❌ Connection to Oracle failed: {e}")
 
-# Check backend status
+# Fetch System Health from Oracle Backend
 health_data = {}
 try:
     res = requests.get(f"{BACKEND_URL}/health", timeout=3).json()
@@ -55,7 +58,7 @@ try:
 
     col1, col2, col3 = st.columns(3)
     col1.metric(
-        "Kite Login",
+        "Kite Session",
         (
             "Connected"
             if health_data.get("login_authenticated")
@@ -70,6 +73,7 @@ try:
         "Cloud Engine",
         "Running" if health_data.get("service_active") else "Stopped",
     )
+
 except Exception:
     st.error("🔴 **SERVER UNREACHABLE:** Oracle Cloud backend is offline.")
 
@@ -89,17 +93,17 @@ with tab1:
         if st.button("🚨 Emergency Square Off All", type="primary"):
             try:
                 sq = requests.post(f"{BACKEND_URL}/square_off", timeout=5).json()
-                st.warning(f"Status: {sq.get('message')}")
+                st.warning(f"Square Off Signal: {sq.get('message')}")
             except Exception as e:
-                st.error(f"Failed: {e}")
+                st.error(f"Execution Error: {e}")
 
     with col_btn2:
         if st.button("🔄 Sync Account & Margins"):
             try:
                 sy = requests.get(f"{BACKEND_URL}/sync", timeout=5).json()
-                st.success(f"Margin: {sy.get('margin')}")
+                st.success(f"Available Equity Margin: ₹{sy.get('margin')}")
             except Exception as e:
-                st.error(f"Sync failed: {e}")
+                st.error(f"Sync Failed: {e}")
 
 with tab2:
     st.subheader("🚀 Push Manual Signal / Instant Trade")
@@ -132,9 +136,9 @@ with tab2:
                 tr = requests.post(
                     f"{BACKEND_URL}/push_trade", json=payload, timeout=5
                 ).json()
-                st.success(f"Order ID: {tr.get('order_id')}")
+                st.success(f"Order Placed! Order ID: {tr.get('order_id')}")
             except Exception as e:
-                st.error(f"Failed: {e}")
+                st.error(f"Trade Failed: {e}")
 
 with tab3:
     st.subheader("System Event Logs")
