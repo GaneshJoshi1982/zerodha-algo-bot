@@ -2,6 +2,10 @@ import requests
 import streamlit as st
 
 BACKEND_URL = "http://92.4.85.1:10000"  # Oracle Cloud Static IP
+KITE_API_KEY = "magym2s4yk13gsze"
+KITE_LOGIN_URL = (
+    f"https://kite.zerodha.com/connect/login?v=3&api_key={KITE_API_KEY}"
+)
 
 st.set_page_config(
     page_title="Zerodha Trading Bot",
@@ -53,11 +57,11 @@ try:
     else:
         st.error(f"🔴 **SYSTEM DISCONNECTED:** {status_msg}")
 
-    # Display Login Button if Zerodha session is inactive
+    # Direct Kite Connect Login Button
     if not health_data.get("login_authenticated", False):
         st.link_button(
             label="🔑 Click Here to Login to Zerodha",
-            url=f"{BACKEND_URL}/login",
+            url=KITE_LOGIN_URL,
             use_container_width=True,
             type="primary",
         )
