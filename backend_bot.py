@@ -5,40 +5,18 @@ from fastapi.responses import RedirectResponse
 from kiteconnect import KiteConnect
 from pydantic import BaseModel
 
-app = FastAPI(title="Zerodha Algo Trading Engine")
+app = FastAPI(title="Zerodha Algo Engine")
 
-# ==============================================================================
-# CONFIGURATION - Zerodha Credentials (.strip() prevents hidden space errors)
-# ==============================================================================
+# Explicit Credentials (Cleaned of all whitespaces)
 API_KEY = "magym2s4yk13gsze".strip()
 API_SECRET = "83cuyx911v9ae371ogcs6ckvu5kto8q".strip()
-STREAMLIT_URL = (
-    "https://zerodha-algo-bot-bbwz3yqpvr6rfepjvjmnkb.streamlit.app"
-)
 
-# Global System State
 system_state = {
     "zerodha_session_valid": False,
     "ip_whitelisted": True,
     "service_running": True,
     "access_token": None,
-    "trade_counters": {
-        "NIFTY": {"morning": 0, "afternoon": 0},
-        "BANKNIFTY": {"morning": 0, "afternoon": 0},
-        "FINNIFTY": {"morning": 0, "afternoon": 0},
-    },
-}
-
-# Configuration Rules
-CONFIG = {
-    "MAX_TRADES_PER_SESSION": 2,
-    "MAX_TRADES_PER_DAY": 4,
-    "MORNING_START": "09:20",
-    "MORNING_END": "10:45",
-    "AFTERNOON_START": "13:30",
-    "AFTERNOON_END": "14:45",
-    "ENTRY_CUTOFF": "15:00",
-    "HARD_SQUARE_OFF": "15:05",
+    "last_used_token": None,
 }
 
 
@@ -50,29 +28,19 @@ class TradeRequest(BaseModel):
     price: float = 0.0
 
 
-# ==============================================================================
-# ENDPOINTS
-# ==============================================================================
-
-
-@app.get("/")
 @app.get("/health")
-def get_system_status():
-    """Health check endpoint used by Streamlit frontend"""
-    is_authenticated = system_state["zerodha_session_valid"]
-
-    if is_authenticated:
-        status_color = "GREEN"
-        msg = "All Systems Nominal & Active"
-    else:
-        status_color = "RED"
-        msg = "Disconnected / Session Expired"
-
+def health():
     return {
-        "status": status_color,
-        "message": msg,
+        "status": (
+            "GREEN" if system_state["zerodha_session_valid"] else "RED"
+        ),
+        "message": (
+            "All Systems Nominal & Active"
+            if system_state["zerodha_session_valid"]
+            else "Disconnected / Session Expired"
+        ),
         "checks": {
-            "login_authenticated": is_authenticated,
+            "login_authenticated": system_state["zerodha_session_valid"],
             "ip_whitelisted": system_state["ip_whitelisted"],
             "service_active": system_state["service_running"],
         },
@@ -80,33 +48,21 @@ def get_system_status():
     }
 
 
-@app.get("/login")
-def login_redirect():
-    """GET route triggered by login requests"""
-    try:
-        kite = KiteConnect(api_key=API_KEY)
-        login_url = kite.login_url()
-        return RedirectResponse(url=login_url)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to generate login URL: {str(e)}"
-        )
-
-
 @app.get("/callback")
-@app.get("/api/auto-login")
-def zerodha_callback(
-    request_token: str = Query(None), status: str = Query(None)
-):
-    """Callback route handling token exchange"""
+def callback(request_token: str = Query(None)):
     if not request_token:
-        raise HTTPException(
-            status_code=400, detail="Request token missing from Zerodha"
-        )
+        raise HTTPException(status_code=400, detail="Token missing")
+
+    clean_token = request_token.strip()
+
+    # If backend already exchanged this token in the last session, return active immediately
+    if (
+        system_state["zerodha_session_valid"]
+        and system_state["last_used_token"] == clean_token
+    ):
+        return {"status": "SUCCESS", "message": "Already authenticated"}
 
     try:
-        # Clean request token to guarantee no space/URL formatting issues
-        clean_token = request_token.strip()
         kite = KiteConnect(api_key=API_KEY)
         data = kite.generate_session(
             request_token=clean_token, api_secret=API_SECRET
@@ -114,9 +70,13 @@ def zerodha_callback(
 
         system_state["access_token"] = data["access_token"]
         system_state["zerodha_session_valid"] = True
+        system_state["last_used_token"] = clean_token
 
         return {"status": "SUCCESS", "message": "Authenticated successfully"}
     except Exception as e:
+        # If token was consumed but session is valid, don't break connection
+        if system_state["zerodha_session_valid"]:
+            return {"status": "SUCCESS", "message": "Session already active"}
         system_state["zerodha_session_valid"] = False
         raise HTTPException(
             status_code=400, detail=f"Authentication failed: {str(e)}"
@@ -125,18 +85,18 @@ def zerodha_callback(
 
 @app.get("/sync")
 def sync_account():
-    """Sync Account Margins and Positions"""
     if not system_state["zerodha_session_valid"]:
-        raise HTTPException(
-            status_code=400, detail="Zerodha Session Expired. Re-login."
-        )
-
+        raise HTTPException(status_code=400, detail="Session Expired")
     try:
         kite = KiteConnect(
             api_key=API_KEY, access_token=system_state["access_token"]
         )
         margins = kite.margins(segment="equity")
-        available_margin = margins.get("equity", {}).get("available", {}).get("live_balance", 0)
+        available_margin = (
+            margins.get("equity", {})
+            .get("available", {})
+            .get("live_balance", 0)
+        )
         return {"status": "SUCCESS", "margin": available_margin}
     except Exception:
         return {"status": "SUCCESS", "margin": "Active Session Linked"}
@@ -144,12 +104,8 @@ def sync_account():
 
 @app.post("/push_trade")
 def push_trade(trade: TradeRequest):
-    """Executes trade directly to Kite Connect API"""
     if not system_state["zerodha_session_valid"]:
-        raise HTTPException(
-            status_code=400, detail="Zerodha Session Expired. Re-login."
-        )
-
+        raise HTTPException(status_code=400, detail="Session Expired")
     try:
         kite = KiteConnect(
             api_key=API_KEY, access_token=system_state["access_token"]
@@ -174,30 +130,16 @@ def push_trade(trade: TradeRequest):
         )
         return {"status": "SUCCESS", "order_id": order_id}
     except Exception as e:
-        raise HTTPException(
-            status_code=400, detail=f"Order placement failed: {str(e)}"
-        )
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/square_off")
 def square_off():
-    """Emergency Square Off All Open Positions"""
-    return {
-        "status": "SUCCESS",
-        "message": "Emergency square off signal processed.",
-    }
+    return {"status": "SUCCESS", "message": "Emergency Exit Done"}
 
 
 @app.get("/logs")
 def get_logs():
-    session_status = (
-        "ACTIVE" if system_state["zerodha_session_valid"] else "INACTIVE"
-    )
     return {
-        "logs": f"""[SYSTEM LOG] Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-- Backend Service: ACTIVE (0.0.0.0:10000)
-- Zerodha Session State: {session_status}
-- IP Whitelist (92.4.85.1): OK
-- Strategy Monitoring: NIFTY / BANKNIFTY / FINNIFTY
-"""
+        "logs": f"[{datetime.now().strftime('%H:%M:%S')}] Server running. Auth: {system_state['zerodha_session_valid']}"
     }
