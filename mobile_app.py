@@ -1,10 +1,12 @@
 import requests
 import streamlit as st
 
-BACKEND_URL = "http://92.4.85.1:10000"  # Oracle Static IP
+BACKEND_URL = "http://92.4.85.1:10000"  # Oracle Cloud Static IP
 
 st.set_page_config(
-    page_title="Zerodha Trading Bot", layout="wide", initial_sidebar_state="collapsed"
+    page_title="Zerodha Trading Bot",
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 st.title("⚡ Zerodha Algorithmic Trading Terminal")
 
@@ -87,7 +89,7 @@ except Exception:
 st.divider()
 
 # ------------------------------------------------------------------------------
-# 3. Tabbed Interface Navigation
+# 3. Multi-Tab Navigation Interface
 # ------------------------------------------------------------------------------
 tab1, tab2, tab3 = st.tabs(
     ["⚙️ Strategy Controls", "🚀 Push Manual Trade", "📋 System Audit Logs"]
@@ -118,9 +120,12 @@ with tab1:
                     sync_res = requests.get(
                         f"{BACKEND_URL}/sync", timeout=5
                     ).json()
-                    st.success(
-                        f"Synced! Available Margin: ₹{sync_res.get('margin', 'N/A')}"
-                    )
+                    if sync_res.get("status") == "SUCCESS":
+                        st.success(
+                            f"Synced! Available Equity Margin: ₹{sync_res.get('margin', 'N/A')}"
+                        )
+                    else:
+                        st.error("Sync failed: Check backend connection.")
                 except Exception as e:
                     st.error(f"Sync failed: {e}")
 
@@ -130,7 +135,8 @@ with tab2:
         col_t1, col_t2 = st.columns(2)
         with col_t1:
             symbol = st.selectbox(
-                "Select Index / Asset", ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+                "Select Index / Asset",
+                ["NIFTY26AUGCE", "BANKNIFTY26AUGCE", "FINNIFTY26AUGCE"],
             )
             transaction_type = st.radio(
                 "Transaction Type", ["BUY", "SELL"], horizontal=True
@@ -161,9 +167,14 @@ with tab2:
                 trade_res = requests.post(
                     f"{BACKEND_URL}/push_trade", json=payload, timeout=5
                 ).json()
-                st.success(
-                    f"✅ Order Placed Successfully! Order ID: {trade_res.get('order_id', 'N/A')}"
-                )
+                if trade_res.get("status") == "SUCCESS":
+                    st.success(
+                        f"✅ Order Placed Successfully! Order ID: {trade_res.get('order_id', 'N/A')}"
+                    )
+                else:
+                    st.error(
+                        f"❌ Trade Rejected: {trade_res.get('detail', 'Unknown error')}"
+                    )
             except Exception as e:
                 st.error(f"❌ Failed to push trade: {e}")
 
