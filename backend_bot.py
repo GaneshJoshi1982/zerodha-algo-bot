@@ -8,7 +8,7 @@ from pydantic import BaseModel
 app = FastAPI(title="Zerodha Algo Trading Engine")
 
 # ==============================================================================
-# CONFIGURATION - Set your Zerodha Credentials here
+# CONFIGURATION - Zerodha Credentials
 # ==============================================================================
 API_KEY = "magym2s4yk13gsze"
 API_SECRET = "83cuyx911v9ae371ogcs6ckvu5kto8q"
@@ -134,18 +134,16 @@ def sync_account():
             api_key=API_KEY, access_token=system_state["access_token"]
         )
         margins = kite.margins(segment="equity")
-        available_margin = (
-            margins.get("equity", {}).get("available", {}).get("live_balance", 0
-        )
+        available_margin = margins.get("equity", {}).get("available", {}).get("live_balance", 0)
         return {"status": "SUCCESS", "margin": available_margin}
     except Exception:
-        # Graceful response if market API returns structure variation
+        # Fallback if structure varies outside market hours
         return {"status": "SUCCESS", "margin": "Active Session Linked"}
 
 
 @app.post("/push_trade")
 def push_trade(trade: TradeRequest):
-    """Executes or pushes trade directly to Kite Connect API"""
+    """Executes trade directly to Kite Connect API"""
     if not system_state["zerodha_session_valid"]:
         raise HTTPException(
             status_code=400, detail="Zerodha Session Expired. Re-login."
