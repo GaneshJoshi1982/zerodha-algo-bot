@@ -1,5 +1,5 @@
-import streamlit as st
 import requests
+import streamlit as st
 
 BACKEND_URL = "http://92.4.85.1:10000"  # Your Oracle Static IP
 
@@ -12,7 +12,7 @@ try:
     status_color = res.get("status", "RED")
     status_msg = res.get("message", "Offline")
     checks = res.get("checks", {})
-    
+
     if status_color == "GREEN":
         st.success(f"🟢 **SYSTEM ACTIVE:** {status_msg}")
     elif status_color == "YELLOW":
@@ -20,14 +20,34 @@ try:
     else:
         st.error(f"🔴 **SYSTEM DISCONNECTED:** {status_msg}")
 
+    # Front-page Login Button (Appears when Kite session is disconnected)
+    if not checks.get("login_authenticated", False):
+        st.link_button(
+            label="🔑 Click Here to Login to Zerodha",
+            url=f"{BACKEND_URL}/login",
+            use_container_width=True,
+            type="primary",
+        )
+
     # Detailed Connection Matrix
     col1, col2, col3 = st.columns(3)
-    col1.metric("Kite Login", "Connected" if checks.get("login_authenticated") else "Disconnected")
-    col2.metric("IP Whitelist (92.4.85.1)", "Active" if checks.get("ip_whitelisted") else "Pending")
-    col3.metric("Cloud Engine", "Running" if checks.get("service_active") else "Stopped")
+    col1.metric(
+        "Kite Login",
+        "Connected" if checks.get("login_authenticated") else "Disconnected",
+    )
+    col2.metric(
+        "IP Whitelist (92.4.85.1)",
+        "Active" if checks.get("ip_whitelisted") else "Pending",
+    )
+    col3.metric(
+        "Cloud Engine",
+        "Running" if checks.get("service_active") else "Stopped",
+    )
 
 except Exception:
-    st.error("🔴 **SERVER UNREACHABLE:** Oracle Cloud service is not responding or port 10000 is closed.")
+    st.error(
+        "🔴 **SERVER UNREACHABLE:** Oracle Cloud service is not responding or port 10000 is closed."
+    )
 
 st.divider()
 st.subheader("Strategy Controls")
