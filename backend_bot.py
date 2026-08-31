@@ -8,10 +8,10 @@ from pydantic import BaseModel
 app = FastAPI(title="Zerodha Algo Trading Engine")
 
 # ==============================================================================
-# CONFIGURATION - Zerodha Credentials
+# CONFIGURATION - Zerodha Credentials (.strip() prevents hidden space errors)
 # ==============================================================================
-API_KEY = "magym2s4yk13gsze"
-API_SECRET = "83cuyx911v9ae371ogcs6ckvu5kto8q"
+API_KEY = "magym2s4yk13gsze".strip()
+API_SECRET = "83cuyx911v9ae371ogcs6ckvu5kto8q".strip()
 STREAMLIT_URL = (
     "https://zerodha-algo-bot-bbwz3yqpvr6rfepjvjmnkb.streamlit.app"
 )
@@ -105,9 +105,11 @@ def zerodha_callback(
         )
 
     try:
+        # Clean request token to guarantee no space/URL formatting issues
+        clean_token = request_token.strip()
         kite = KiteConnect(api_key=API_KEY)
         data = kite.generate_session(
-            request_token=request_token, api_secret=API_SECRET
+            request_token=clean_token, api_secret=API_SECRET
         )
 
         system_state["access_token"] = data["access_token"]
