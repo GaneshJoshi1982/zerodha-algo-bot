@@ -82,7 +82,7 @@ def get_system_status():
 
 @app.get("/login")
 def login_redirect():
-    """GET route triggered by Streamlit login button to open Zerodha 2FA"""
+    """GET route triggered by login requests"""
     try:
         kite = KiteConnect(api_key=API_KEY)
         login_url = kite.login_url()
@@ -137,7 +137,6 @@ def sync_account():
         available_margin = margins.get("equity", {}).get("available", {}).get("live_balance", 0)
         return {"status": "SUCCESS", "margin": available_margin}
     except Exception:
-        # Fallback if structure varies outside market hours
         return {"status": "SUCCESS", "margin": "Active Session Linked"}
 
 
