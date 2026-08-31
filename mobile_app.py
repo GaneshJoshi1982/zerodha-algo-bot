@@ -15,30 +15,33 @@ st.set_page_config(
 st.title("⚡ Zerodha Algorithmic Trading Terminal")
 
 # ------------------------------------------------------------------------------
-# 1. Process Request Token automatically when Zerodha Redirects Back
+# 1. Process Request Token automatically and clean URL parameters
 # ------------------------------------------------------------------------------
-query_params = st.query_params
-if "request_token" in query_params:
-    req_token = query_params["request_token"]
-    st.info("🔄 Validating Zerodha Token with Backend...")
+if "request_token" in st.query_params:
+    req_token = st.query_params["request_token"]
 
-    try:
-        callback_res = requests.get(
-            f"{BACKEND_URL}/callback",
-            params={"request_token": req_token},
-            timeout=10,
-        )
-        if callback_res.status_code == 200:
-            st.success("✅ Connected to Zerodha successfully!")
-            st.query_params.clear()
-            st.rerun()
-        else:
-            err_msg = callback_res.json().get(
-                "detail", "Token exchange failed"
+    with st.spinner("🔄 Authenticating session with Oracle Backend..."):
+        try:
+            callback_res = requests.get(
+                f"{BACKEND_URL}/callback",
+                params={"request_token": req_token},
+                timeout=10,
             )
-            st.error(f"❌ Login Failed: {err_msg}")
-    except Exception as e:
-        st.error(f"❌ Could not contact backend: {e}")
+
+            # Instantly clear query params before rerunning
+            st.query_params.clear()
+
+            if callback_res.status_code == 200:
+                st.success("✅ Connected to Zerodha successfully!")
+                st.rerun()
+            else:
+                err_msg = callback_res.json().get(
+                    "detail", "Token exchange failed"
+                )
+                st.error(f"❌ Login Failed: {err_msg}")
+        except Exception as e:
+            st.query_params.clear()
+            st.error(f"❌ Could not contact backend: {e}")
 
 # ------------------------------------------------------------------------------
 # 2. Fetch Backend Health Status & Banner
@@ -52,8 +55,6 @@ try:
 
     if status_color == "GREEN":
         st.success(f"🟢 **SYSTEM ACTIVE:** {status_msg}")
-    elif status_color == "YELLOW":
-        st.warning(f"🟡 **ACTION REQUIRED:** {status_msg}")
     else:
         st.error(f"🔴 **SYSTEM DISCONNECTED:** {status_msg}")
 
@@ -66,7 +67,7 @@ try:
             type="primary",
         )
 
-    # Detailed Connection Matrix
+    # Connection Matrix
     col1, col2, col3 = st.columns(3)
     col1.metric(
         "Kite Login",
