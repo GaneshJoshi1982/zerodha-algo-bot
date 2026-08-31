@@ -1,14 +1,13 @@
 from datetime import datetime
 import os
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import RedirectResponse
 from kiteconnect import KiteConnect
 from pydantic import BaseModel
 
-app = FastAPI(title="Zerodha Algo Engine")
+app = FastAPI(title="Zerodha Production Engine")
 
 # ==============================================================================
-# CONFIGURATION
+# CREDENTIALS & DISK STORAGE
 # ==============================================================================
 API_KEY = "magym2s4yk13gsze".strip()
 API_SECRET = "83cuyx911v9ae371ogcs6ckvu5kto8q".strip()
@@ -22,28 +21,26 @@ system_state = {
 }
 
 
-def load_token_from_disk():
-    """Load cached token on server startup if present"""
+def init_token_from_disk():
+    """Restores saved session on boot/restart without re-authenticating"""
     if os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE, "r") as f:
                 saved_token = f.read().strip()
                 if saved_token:
-                    # Test if saved token is valid with Kite API
                     kite = KiteConnect(
                         api_key=API_KEY, access_token=saved_token
                     )
-                    kite.margins(segment="equity")
+                    kite.margins(segment="equity")  # Verify token health
                     system_state["access_token"] = saved_token
                     system_state["zerodha_session_valid"] = True
                     print("[SYSTEM] Successfully restored session from disk.")
         except Exception:
-            print("[SYSTEM] Saved token expired or invalid.")
+            print("[SYSTEM] Disk token invalid or expired.")
             system_state["zerodha_session_valid"] = False
 
 
-# Initialize token from disk on boot
-load_token_from_disk()
+init_token_from_disk()
 
 
 class TradeRequest(BaseModel):
@@ -81,25 +78,24 @@ def health():
 
 @app.get("/callback")
 def zerodha_callback(request_token: str = Query(None)):
-    """Exchanges request token and saves access token permanently to disk"""
+    """Only Oracle exchanges the request token"""
     if not request_token:
         raise HTTPException(status_code=400, detail="Missing request_token")
 
-    clean_req_token = request_token.strip()
+    clean_token = request_token.strip()
 
-    # If already logged in, ignore redundant callback triggers
     if system_state["zerodha_session_valid"]:
         return {"status": "SUCCESS", "message": "Session already active"}
 
     try:
         kite = KiteConnect(api_key=API_KEY)
         data = kite.generate_session(
-            request_token=clean_req_token, api_secret=API_SECRET
+            request_token=clean_token, api_secret=API_SECRET
         )
 
         access_token = data["access_token"]
 
-        # Persist access token to disk
+        # Save to disk permanently
         with open(TOKEN_FILE, "w") as f:
             f.write(access_token)
 
@@ -118,7 +114,7 @@ def zerodha_callback(request_token: str = Query(None)):
 def sync_account():
     if not system_state["zerodha_session_valid"]:
         raise HTTPException(
-            status_code=400, detail="Zerodha session expired. Login required."
+            status_code=400, detail="Session expired. Re-login."
         )
 
     try:
@@ -134,16 +130,14 @@ def sync_account():
         return {"status": "SUCCESS", "margin": available_margin}
     except Exception as e:
         system_state["zerodha_session_valid"] = False
-        raise HTTPException(
-            status_code=400, detail=f"Sync error: {str(e)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Sync error: {str(e)}")
 
 
 @app.post("/push_trade")
 def push_trade(trade: TradeRequest):
     if not system_state["zerodha_session_valid"]:
         raise HTTPException(
-            status_code=400, detail="Zerodha session expired. Login required."
+            status_code=400, detail="Session expired. Re-login."
         )
 
     try:
@@ -186,5 +180,5 @@ def square_off():
 @app.get("/logs")
 def get_logs():
     return {
-        "logs": f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Engine Active | Session: {system_state['zerodha_session_valid']}"
+        "logs": f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Active session: {system_state['zerodha_session_valid']}"
     }
