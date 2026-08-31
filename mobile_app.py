@@ -122,7 +122,7 @@ with tab1:
                     ).json()
                     if sync_res.get("status") == "SUCCESS":
                         st.success(
-                            f"Synced! Available Equity Margin: ₹{sync_res.get('margin', 'N/A')}"
+                            f"Synced! Margin Info: {sync_res.get('margin', 'N/A')}"
                         )
                     else:
                         st.error("Sync failed: Check backend connection.")
@@ -134,10 +134,7 @@ with tab2:
     with st.form("push_trade_form"):
         col_t1, col_t2 = st.columns(2)
         with col_t1:
-            symbol = st.selectbox(
-                "Select Index / Asset",
-                ["NIFTY26AUGCE", "BANKNIFTY26AUGCE", "FINNIFTY26AUGCE"],
-            )
+            symbol = st.text_input("Trading Symbol", value="NIFTY26AUG24000CE")
             transaction_type = st.radio(
                 "Transaction Type", ["BUY", "SELL"], horizontal=True
             )
