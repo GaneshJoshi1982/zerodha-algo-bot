@@ -14,10 +14,9 @@ st.set_page_config(
 )
 st.title("⚡ Zerodha Algorithmic Trading Terminal")
 
-# Process incoming token if redirected from Zerodha
+# Process single incoming token and clear URL instantly
 if "request_token" in st.query_params:
     token = st.query_params["request_token"]
-    st.info("🔄 Processing Zerodha Authentication...")
 
     try:
         res = requests.get(
@@ -25,17 +24,18 @@ if "request_token" in st.query_params:
             params={"request_token": token},
             timeout=10,
         )
-        st.query_params.clear()
+        st.query_params.clear()  # Immediately wipe token from browser bar
+
         if res.status_code == 200:
-            st.success("✅ Connected successfully!")
+            st.success("✅ Connected to Oracle Engine successfully!")
             st.rerun()
         else:
-            st.error(f"❌ Authentication Error: {res.text}")
+            st.error(f"❌ Backend Auth Failure: {res.text}")
     except Exception as e:
         st.query_params.clear()
         st.error(f"❌ Connection to Oracle failed: {e}")
 
-# Fetch System Health from Oracle Backend
+# Fetch live health status from Oracle Cloud Engine
 health_data = {}
 try:
     res = requests.get(f"{BACKEND_URL}/health", timeout=3).json()
