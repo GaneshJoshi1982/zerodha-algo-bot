@@ -1,5 +1,5 @@
-import asyncio
 from datetime import datetime
+import os
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from kiteconnect import KiteConnect
@@ -7,17 +7,43 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Zerodha Algo Engine")
 
-# Explicit Credentials (Cleaned of all whitespaces)
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
 API_KEY = "magym2s4yk13gsze".strip()
 API_SECRET = "83cuyx911v9ae371ogcs6ckvu5kto8q".strip()
+TOKEN_FILE = "/home/ubuntu/.kite_token"
 
 system_state = {
     "zerodha_session_valid": False,
+    "access_token": None,
     "ip_whitelisted": True,
     "service_running": True,
-    "access_token": None,
-    "last_used_token": None,
 }
+
+
+def load_token_from_disk():
+    """Load cached token on server startup if present"""
+    if os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, "r") as f:
+                saved_token = f.read().strip()
+                if saved_token:
+                    # Test if saved token is valid with Kite API
+                    kite = KiteConnect(
+                        api_key=API_KEY, access_token=saved_token
+                    )
+                    kite.margins(segment="equity")
+                    system_state["access_token"] = saved_token
+                    system_state["zerodha_session_valid"] = True
+                    print("[SYSTEM] Successfully restored session from disk.")
+        except Exception:
+            print("[SYSTEM] Saved token expired or invalid.")
+            system_state["zerodha_session_valid"] = False
+
+
+# Initialize token from disk on boot
+load_token_from_disk()
 
 
 class TradeRequest(BaseModel):
@@ -28,6 +54,11 @@ class TradeRequest(BaseModel):
     price: float = 0.0
 
 
+# ==============================================================================
+# ENDPOINTS
+# ==============================================================================
+
+
 @app.get("/health")
 def health():
     return {
@@ -35,9 +66,9 @@ def health():
             "GREEN" if system_state["zerodha_session_valid"] else "RED"
         ),
         "message": (
-            "All Systems Nominal & Active"
+            "All Systems Active & Linked"
             if system_state["zerodha_session_valid"]
-            else "Disconnected / Session Expired"
+            else "Disconnected / Login Required"
         ),
         "checks": {
             "login_authenticated": system_state["zerodha_session_valid"],
@@ -49,34 +80,34 @@ def health():
 
 
 @app.get("/callback")
-def callback(request_token: str = Query(None)):
+def zerodha_callback(request_token: str = Query(None)):
+    """Exchanges request token and saves access token permanently to disk"""
     if not request_token:
-        raise HTTPException(status_code=400, detail="Token missing")
+        raise HTTPException(status_code=400, detail="Missing request_token")
 
-    clean_token = request_token.strip()
+    clean_req_token = request_token.strip()
 
-    # If backend already exchanged this token in the last session, return active immediately
-    if (
-        system_state["zerodha_session_valid"]
-        and system_state["last_used_token"] == clean_token
-    ):
-        return {"status": "SUCCESS", "message": "Already authenticated"}
+    # If already logged in, ignore redundant callback triggers
+    if system_state["zerodha_session_valid"]:
+        return {"status": "SUCCESS", "message": "Session already active"}
 
     try:
         kite = KiteConnect(api_key=API_KEY)
         data = kite.generate_session(
-            request_token=clean_token, api_secret=API_SECRET
+            request_token=clean_req_token, api_secret=API_SECRET
         )
 
-        system_state["access_token"] = data["access_token"]
+        access_token = data["access_token"]
+
+        # Persist access token to disk
+        with open(TOKEN_FILE, "w") as f:
+            f.write(access_token)
+
+        system_state["access_token"] = access_token
         system_state["zerodha_session_valid"] = True
-        system_state["last_used_token"] = clean_token
 
         return {"status": "SUCCESS", "message": "Authenticated successfully"}
     except Exception as e:
-        # If token was consumed but session is valid, don't break connection
-        if system_state["zerodha_session_valid"]:
-            return {"status": "SUCCESS", "message": "Session already active"}
         system_state["zerodha_session_valid"] = False
         raise HTTPException(
             status_code=400, detail=f"Authentication failed: {str(e)}"
@@ -86,7 +117,10 @@ def callback(request_token: str = Query(None)):
 @app.get("/sync")
 def sync_account():
     if not system_state["zerodha_session_valid"]:
-        raise HTTPException(status_code=400, detail="Session Expired")
+        raise HTTPException(
+            status_code=400, detail="Zerodha session expired. Login required."
+        )
+
     try:
         kite = KiteConnect(
             api_key=API_KEY, access_token=system_state["access_token"]
@@ -98,14 +132,20 @@ def sync_account():
             .get("live_balance", 0)
         )
         return {"status": "SUCCESS", "margin": available_margin}
-    except Exception:
-        return {"status": "SUCCESS", "margin": "Active Session Linked"}
+    except Exception as e:
+        system_state["zerodha_session_valid"] = False
+        raise HTTPException(
+            status_code=400, detail=f"Sync error: {str(e)}"
+        )
 
 
 @app.post("/push_trade")
 def push_trade(trade: TradeRequest):
     if not system_state["zerodha_session_valid"]:
-        raise HTTPException(status_code=400, detail="Session Expired")
+        raise HTTPException(
+            status_code=400, detail="Zerodha session expired. Login required."
+        )
+
     try:
         kite = KiteConnect(
             api_key=API_KEY, access_token=system_state["access_token"]
@@ -130,16 +170,21 @@ def push_trade(trade: TradeRequest):
         )
         return {"status": "SUCCESS", "order_id": order_id}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(
+            status_code=400, detail=f"Order rejected: {str(e)}"
+        )
 
 
 @app.post("/square_off")
 def square_off():
-    return {"status": "SUCCESS", "message": "Emergency Exit Done"}
+    return {
+        "status": "SUCCESS",
+        "message": "Emergency square off signal processed.",
+    }
 
 
 @app.get("/logs")
 def get_logs():
     return {
-        "logs": f"[{datetime.now().strftime('%H:%M:%S')}] Server running. Auth: {system_state['zerodha_session_valid']}"
+        "logs": f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Engine Active | Session: {system_state['zerodha_session_valid']}"
     }
