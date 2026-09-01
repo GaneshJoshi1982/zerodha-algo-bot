@@ -10,7 +10,7 @@ app = FastAPI(title="Zerodha Algorithmic Trading Engine")
 # CONFIGURATION
 # ==============================================================================
 API_KEY = "magym2s4yk13gsze".strip()
-API_SECRET = "83cuyx911v9ae371ogcs6ckvu5kto8q".strip()
+API_SECRET = "uxph73v40oemxff3c9xn48swqwctbfmf".strip()
 TOKEN_FILE = "/home/ubuntu/.kite_token"
 
 system_state = {
@@ -37,8 +37,8 @@ def load_token_from_disk():
                     print(
                         "[SYSTEM] Session successfully restored from persistent storage."
                     )
-        except Exception:
-            print("[SYSTEM] Saved disk token expired or invalid.")
+        except Exception as e:
+            print(f"[SYSTEM] Saved disk token expired or invalid: {e}")
             system_state["zerodha_session_valid"] = False
 
 
@@ -87,7 +87,7 @@ def zerodha_callback(request_token: str = Query(None)):
 
     clean_req_token = request_token.strip()
 
-    # If session is already authenticated, return success without re-exchanging token
+    # Lockout Check: Return success immediately if session is already valid
     if system_state["zerodha_session_valid"]:
         return {"status": "SUCCESS", "message": "Session already active"}
 
@@ -99,7 +99,7 @@ def zerodha_callback(request_token: str = Query(None)):
 
         access_token = data["access_token"]
 
-        # Save access token to persistent storage
+        # Save access token to disk
         with open(TOKEN_FILE, "w") as f:
             f.write(access_token)
 
