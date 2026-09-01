@@ -6,9 +6,6 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Zerodha Algorithmic Trading Engine")
 
-# ==============================================================================
-# CONFIGURATION
-# ==============================================================================
 API_KEY = "magym2s4yk13gsze".strip()
 API_SECRET = "uxph73v40oemxff3c9xn48swqwctbfmf".strip()
 TOKEN_FILE = "/home/ubuntu/.kite_token"
@@ -22,7 +19,6 @@ system_state = {
 
 
 def load_token_from_disk():
-    """Load cached session token from disk on server startup if valid."""
     if os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE, "r") as f:
@@ -34,29 +30,20 @@ def load_token_from_disk():
                     kite.margins(segment="equity")
                     system_state["access_token"] = saved_token
                     system_state["zerodha_session_valid"] = True
-                    print(
-                        "[SYSTEM] Session successfully restored from persistent storage."
-                    )
-        except Exception as e:
-            print(f"[SYSTEM] Saved disk token expired or invalid: {e}")
+        except Exception:
             system_state["zerodha_session_valid"] = False
 
 
-# Initialize token from disk on boot
 load_token_from_disk()
 
 
 class TradeRequest(BaseModel):
+    exchange: str = "NSE"
     symbol: str
     transaction_type: str
     quantity: int
     order_type: str
     price: float = 0.0
-
-
-# ==============================================================================
-# ENDPOINTS
-# ==============================================================================
 
 
 @app.get("/health")
@@ -81,36 +68,26 @@ def health():
 
 @app.get("/callback")
 def zerodha_callback(request_token: str = Query(None)):
-    """Exchanges Zerodha request token and persists access token to disk."""
     if not request_token:
         raise HTTPException(status_code=400, detail="Missing request_token")
 
-    clean_req_token = request_token.strip()
-
-    # Lockout Check: Return success immediately if session is already valid
     if system_state["zerodha_session_valid"]:
         return {"status": "SUCCESS", "message": "Session already active"}
 
     try:
         kite = KiteConnect(api_key=API_KEY)
         data = kite.generate_session(
-            request_token=clean_req_token, api_secret=API_SECRET
+            request_token=request_token.strip(), api_secret=API_SECRET
         )
-
         access_token = data["access_token"]
-
-        # Save access token to disk
         with open(TOKEN_FILE, "w") as f:
             f.write(access_token)
-
         system_state["access_token"] = access_token
         system_state["zerodha_session_valid"] = True
-
         return {"status": "SUCCESS", "message": "Authenticated successfully"}
     except Exception as e:
         if system_state["zerodha_session_valid"]:
             return {"status": "SUCCESS", "message": "Session already active"}
-
         system_state["zerodha_session_valid"] = False
         raise HTTPException(
             status_code=400, detail=f"Authentication failed: {str(e)}"
@@ -129,10 +106,10 @@ def sync_account():
             api_key=API_KEY, access_token=system_state["access_token"]
         )
         margins = kite.margins(segment="equity")
-        available_margin = (
-            margins.get("equity", {})
-            .get("available", {})
-            .get("live_balance", 0)
+        # Extract net/cash margin from Zerodha dict
+        equity_data = margins.get("equity", {})
+        available_margin = equity_data.get("available", {}).get(
+            "live_balance", equity_data.get("net", 0)
         )
         return {"status": "SUCCESS", "margin": available_margin}
     except Exception as e:
@@ -153,8 +130,12 @@ def push_trade(trade: TradeRequest):
         )
         order_id = kite.place_order(
             variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NFO,
-            tradingsymbol=trade.symbol,
+            exchange=(
+                kite.EXCHANGE_NSE
+                if trade.exchange == "NSE"
+                else kite.EXCHANGE_NFO
+            ),
+            tradingsymbol=trade.symbol.strip().upper(),
             transaction_type=(
                 kite.TRANSACTION_TYPE_BUY
                 if trade.transaction_type == "BUY"
@@ -169,10 +150,10 @@ def push_trade(trade: TradeRequest):
             ),
             price=trade.price if trade.order_type == "LIMIT" else None,
         )
-        return {"status": "SUCCESS", "order_id": order_id}
+        return {"status": "SUCCESS", "order_id": str(order_id)}
     except Exception as e:
         raise HTTPException(
-            status_code=400, detail=f"Order rejected: {str(e)}"
+            status_code=400, detail=f"Order rejected by Zerodha: {str(e)}"
         )
 
 
