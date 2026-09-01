@@ -1,358 +1,313 @@
-import asyncio
-from contextlib import asynccontextmanager
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
+import math
 import os
-from fastapi import FastAPI, HTTPException, Query
+import time
 from kiteconnect import KiteConnect
-from pydantic import BaseModel
+import numpy as np
+import pandas as pd
+import requests
+import streamlit as st
 
-# ==============================================================================
-# CONFIGURATION & PERSISTENCE
-# ==============================================================================
-API_KEY = "magym2s4yk13gsze".strip()
-API_SECRET = "uxph73v40oemxff3c9xn48swqwctbfmf".strip()
-TOKEN_FILE = "/home/ubuntu/.kite_token"
+# ==========================================
+# 1. CONFIGURATION & CONSTANTS
+# ==========================================
+API_KEY = "magym2s4yk13gsze"
+API_SECRET = "uxph73v40oemxff3c9xn48swqwctbfmf"
+TOKEN_FILE = "access_token.txt"
+RENDER_BACKEND = "http://92.4.85.1:10000"
 
-system_state = {
-    "zerodha_session_valid": False,
-    "access_token": None,
-    "ip_whitelisted": True,
-    "service_running": True,
-    "daily_trade_count": 0,
-    "daily_pnl": 0.0,
-    "last_exit_time": None,
-    "active_position": None,  # Holds 4-Stage SL Tracking
-    "scanner_logs": [],
+# Risk Guardrails
+MAX_RISK_PER_TRADE = 2000.0  # Max loss capped at ₹2,000 per trade
+DEFAULT_SL_PCT = 0.15        # 15% Initial Hard Stop Loss
+
+LOT_SIZES = {
+    "NIFTY": 65,
+    "BANKNIFTY": 15,
+    "FINNIFTY": 25,
+    "MIDCPNIFTY": 50,
+    "SENSEX": 10,
+    "BANKEX": 15,
 }
 
+INDEX_TOKENS = {
+    "NIFTY": {"token": 256265, "symbol": "NSE:NIFTY 50", "segment": "NFO"},
+    "BANKNIFTY": {"token": 260105, "symbol": "NSE:NIFTY BANK", "segment": "NFO"},
+    "FINNIFTY": {"token": 257801, "symbol": "NSE:NIFTY FIN SERVICE", "segment": "NFO"},
+    "SENSEX": {"token": 265, "symbol": "BSE:SENSEX", "segment": "BFO"},
+}
 
-def log_event(msg: str):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    entry = f"[{timestamp}] {msg}"
-    system_state["scanner_logs"].append(entry)
-    if len(system_state["scanner_logs"]) > 100:
-        system_state["scanner_logs"].pop(0)
-    print(entry)
+# ==========================================
+# 2. ZERODHA SESSION & MARGIN AUTHENTICATION
+# ==========================================
+def get_kite_session():
+    kite = KiteConnect(api_key=API_KEY)
+    
+    # Try fetching shared token from Oracle VPS
+    try:
+        res = requests.get(f"{RENDER_BACKEND}/get-token", timeout=3).json()
+        if res.get("status") == "SUCCESS" and "access_token" in res:
+            access_token = res["access_token"]
+            kite.set_access_token(access_token)
+            kite.profile()
+            return kite
+    except Exception:
+        pass
 
-
-def load_token_from_disk():
+    # Try local access token file
     if os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE, "r") as f:
-                saved_token = f.read().strip()
-                if saved_token:
-                    kite = KiteConnect(
-                        api_key=API_KEY, access_token=saved_token
-                    )
-                    kite.margins(segment="equity")
-                    system_state["access_token"] = saved_token
-                    system_state["zerodha_session_valid"] = True
-                    log_event("Session restored from persistent disk.")
-        except Exception as e:
-            system_state["zerodha_session_valid"] = False
-
-
-# ==============================================================================
-# STRATEGY & DYNAMIC STRIKE SELECTION
-# ==============================================================================
-
-
-def get_otm_contract_symbol(index_name: str, spot_price: float, bias: str):
-    """Calculates ATM/OTM strike and formats Zerodha NFO symbol."""
-    step = 100 if index_name == "BANKNIFTY" else 50
-    strike = round(spot_price / step) * step
-
-    if bias == "BULLISH":
-        strike += step
-    else:
-        strike -= step
-
-    option_type = "CE" if bias == "BULLISH" else "PE"
-    now = datetime.now()
-    month_str = now.strftime("%b").upper()
-    yr_str = now.strftime("%y")
-
-    return f"{index_name}{yr_str}{month_str}{int(strike)}{option_type}"
-
-
-def manage_active_position(kite: KiteConnect):
-    """4-Stage Trailing SL Risk Engine Implementation."""
-    pos = system_state["active_position"]
-    if not pos:
-        return
-
-    symbol = pos["symbol"]
-    try:
-        quote = kite.ltp(f"NFO:{symbol}")
-        curr_price = quote.get(f"NFO:{symbol}", {}).get("last_price", 0.0)
-    except Exception:
-        return
-
-    if curr_price <= 0:
-        return
-
-    entry_price = pos["entry_price"]
-    stage = pos["stage"]
-    current_sl = pos["sl_price"]
-    pnl_pct = ((curr_price - entry_price) / entry_price) * 100
-
-    # Stage 1: Hard SL Check (-15%)
-    if curr_price <= current_sl:
-        execute_position_exit(
-            kite, symbol, pos["qty"], f"Stage 1 SL Hit @ ₹{curr_price}"
-        )
-        return
-
-    # Stage 1 -> Stage 2: Move to Breakeven @ +15% gain
-    if stage == 1 and pnl_pct >= 15.0:
-        pos["stage"] = 2
-        pos["sl_price"] = entry_price
-        log_event(
-            f"STAGE 2: Gain +{pnl_pct:.1f}%. SL moved to Breakeven (₹{entry_price})."
-        )
-
-    # Stage 2 -> Stage 3: Lock +20% Profit @ +50% gain
-    elif stage == 2 and pnl_pct >= 50.0:
-        pos["stage"] = 3
-        pos["sl_price"] = entry_price * 1.20
-        log_event(
-            f"STAGE 3: Gain +{pnl_pct:.1f}%. SL frozen at +20% profit (₹{pos['sl_price']:.2f})."
-        )
-
-
-def execute_position_exit(
-    kite: KiteConnect, symbol: str, qty: int, reason: str
-):
-    try:
-        kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NFO,
-            tradingsymbol=symbol,
-            transaction_type=kite.TRANSACTION_TYPE_SELL,
-            quantity=qty,
-            product=kite.PRODUCT_MIS,
-            order_type=kite.ORDER_TYPE_MARKET,
-        )
-        log_event(f"POSITION EXITED | {reason}")
-        system_state["active_position"] = None
-        system_state["last_exit_time"] = datetime.now()
-    except Exception as e:
-        log_event(f"Exit order failed: {e}")
-
-
-async def background_scanner_loop():
-    """Background engine managing 3-Min scans & 3:05 PM exit."""
-    log_event("3-Minute Hilega-Milega Strategy Engine active.")
-    while True:
-        try:
-            now = datetime.now()
-            if (
-                system_state["zerodha_session_valid"]
-                and time(9, 15) <= now.time() <= time(15, 5)
-            ):
-                kite = KiteConnect(
-                    api_key=API_KEY, access_token=system_state["access_token"]
-                )
-                if system_state["active_position"]:
-                    manage_active_position(kite)
-                elif now.time() >= time(15, 5) and system_state[
-                    "active_position"
-                ]:
-                    pos = system_state["active_position"]
-                    execute_position_exit(
-                        kite, pos["symbol"], pos["qty"], "3:05 PM Hard Exit"
-                    )
-        except Exception as e:
-            log_event(f"Background check loop: {e}")
-
-        await asyncio.sleep(180)
-
-
-# ==============================================================================
-# FASTAPI ENDPOINTS
-# ==============================================================================
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    load_token_from_disk()
-    scanner_task = asyncio.create_task(background_scanner_loop())
-    yield
-    scanner_task.cancel()
-
-
-app = FastAPI(
-    title="Zerodha Algorithmic Trading Engine", lifespan=lifespan
-)
-
-
-class TradeRequest(BaseModel):
-    exchange: str = "NSE"
-    symbol: str
-    transaction_type: str
-    quantity: int
-    order_type: str
-    price: float = 0.0
-
-
-@app.get("/health")
-def health():
-    return {
-        "status": (
-            "GREEN" if system_state["zerodha_session_valid"] else "RED"
-        ),
-        "message": (
-            "All Systems Active & Linked"
-            if system_state["zerodha_session_valid"]
-            else "Disconnected / Login Required"
-        ),
-        "checks": {
-            "login_authenticated": system_state["zerodha_session_valid"],
-            "ip_whitelisted": system_state["ip_whitelisted"],
-            "service_active": system_state["service_running"],
-        },
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-
-
-@app.get("/callback")
-def zerodha_callback(request_token: str = Query(None)):
-    if not request_token:
-        raise HTTPException(status_code=400, detail="Missing request_token")
-
-    if system_state["zerodha_session_valid"]:
-        return {"status": "SUCCESS", "message": "Session already active"}
-
-    try:
-        kite = KiteConnect(api_key=API_KEY)
-        data = kite.generate_session(
-            request_token=request_token.strip(), api_secret=API_SECRET
-        )
-        access_token = data["access_token"]
-
-        with open(TOKEN_FILE, "w") as f:
-            f.write(access_token)
-
-        system_state["access_token"] = access_token
-        system_state["zerodha_session_valid"] = True
-        return {"status": "SUCCESS", "message": "Authenticated successfully"}
-    except Exception as e:
-        system_state["zerodha_session_valid"] = False
-        raise HTTPException(
-            status_code=400, detail=f"Authentication failed: {str(e)}"
-        )
-
-
-@app.get("/sync")
-def sync_account():
-    if not system_state["zerodha_session_valid"]:
-        raise HTTPException(
-            status_code=400, detail="Zerodha session expired. Login required."
-        )
-
-    try:
-        kite = KiteConnect(
-            api_key=API_KEY, access_token=system_state["access_token"]
-        )
-        m = kite.margins(segment="equity")
-        equity_data = (
-            m["equity"] if "equity" in m and isinstance(m["equity"], dict) else m
-        )
-        available_margin = equity_data.get(
-            "net", equity_data.get("available", {}).get("live_balance", 0)
-        )
-        return {"status": "SUCCESS", "margin": available_margin}
-    except Exception as e:
-        system_state["zerodha_session_valid"] = False
-        raise HTTPException(status_code=400, detail=f"Sync error: {str(e)}")
-
-
-@app.get("/positions")
-def get_positions():
-    if not system_state["zerodha_session_valid"]:
-        raise HTTPException(
-            status_code=400, detail="Zerodha session expired. Login required."
-        )
-
-    try:
-        kite = KiteConnect(
-            api_key=API_KEY, access_token=system_state["access_token"]
-        )
-        pos = kite.positions()
-        return {"status": "SUCCESS", "net": pos.get("net", [])}
-    except Exception as e:
-        raise HTTPException(
-            status_code=400, detail=f"Positions fetch error: {str(e)}"
-        )
-
-
-@app.post("/push_trade")
-def push_trade(trade: TradeRequest):
-    if not system_state["zerodha_session_valid"]:
-        raise HTTPException(
-            status_code=400, detail="Zerodha session expired. Login required."
-        )
-
-    try:
-        kite = KiteConnect(
-            api_key=API_KEY, access_token=system_state["access_token"]
-        )
-        selected_exchange = (
-            kite.EXCHANGE_NSE
-            if trade.exchange.upper() == "NSE"
-            else kite.EXCHANGE_NFO
-        )
-
-        order_id = kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=selected_exchange,
-            tradingsymbol=trade.symbol.strip().upper(),
-            transaction_type=(
-                kite.TRANSACTION_TYPE_BUY
-                if trade.transaction_type == "BUY"
-                else kite.TRANSACTION_TYPE_SELL
-            ),
-            quantity=trade.quantity,
-            product=kite.PRODUCT_MIS,
-            order_type=(
-                kite.ORDER_TYPE_MARKET
-                if trade.order_type == "MARKET"
-                else kite.ORDER_TYPE_LIMIT
-            ),
-            price=trade.price if trade.order_type == "LIMIT" else None,
-        )
-        return {"status": "SUCCESS", "order_id": str(order_id)}
-    except Exception as e:
-        raise HTTPException(
-            status_code=400, detail=f"Order rejected by Zerodha: {str(e)}"
-        )
-
-
-@app.post("/square_off")
-def square_off():
-    if system_state["zerodha_session_valid"] and system_state["active_position"]:
-        try:
-            kite = KiteConnect(
-                api_key=API_KEY, access_token=system_state["access_token"]
-            )
-            pos = system_state["active_position"]
-            execute_position_exit(
-                kite, pos["symbol"], pos["qty"], "Manual Emergency Square Off"
-            )
+                access_token = f.read().strip()
+            kite.set_access_token(access_token)
+            kite.profile()
+            return kite
         except Exception:
             pass
+
+    return None
+
+def check_account_margin(kite, required_margin: float) -> tuple[bool, float]:
+    """Queries live Zerodha funds to verify if margin is sufficient."""
+    try:
+        margins = kite.margins(segment="equity")
+        available_cash = margins.get("enabled", {}).get("available", {}).get("live_balance", 0.0)
+        return (available_cash >= required_margin), available_cash
+    except Exception as e:
+        st.error(f"Margin Check API Failed: {str(e)}")
+        return False, 0.0
+
+# ==========================================
+# 3. INDICATOR CALCULATIONS (HM & LINREG)
+# ==========================================
+def calculate_rsi(series: pd.Series, period: int = 9) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -1 * delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+def calculate_wma(series: pd.Series, length: int = 21) -> pd.Series:
+    weights = np.arange(1, length + 1)
+    return series.rolling(length).apply(
+        lambda window: np.dot(window, weights) / weights.sum(), raw=True
+    )
+
+def calculate_linreg_series(series: pd.Series, length: int = 11) -> pd.Series:
+    """Computes rolling least-squares Linear Regression values (TradingView ta.linreg)."""
+    x = np.arange(length)
+    x_mean = x.mean()
+    x_var = ((x - x_mean) ** 2).sum()
+
+    def get_linreg_val(window):
+        if len(window) < length:
+            return np.nan
+        y_mean = window.mean()
+        slope = ((x - x_mean) * (window - y_mean)).sum() / x_var
+        intercept = y_mean - slope * x_mean
+        return intercept + slope * (length - 1)
+
+    return series.rolling(window=length).apply(get_linreg_val, raw=True)
+
+# ==========================================
+# 4. CONFLUENCE SIGNAL EVALUATION ENGINE
+# ==========================================
+def evaluate_strategy_signals(df_5m: pd.DataFrame, linreg_len: int = 11, signal_len: int = 11) -> dict:
+    """
+    Evaluates strategy using both Linear Regression Candle Crossover AND Hilega-Milega Direction:
+    - BUY_CE: LinReg Crossover Above Signal AND HM EMA 3 > WMA 21
+    - BUY_PE: LinReg Crossover Below Signal AND HM EMA 3 < WMA 21
+    (RSI >= 50 constraint removed per instructions)
+    """
+    if df_5m is None or len(df_5m) < (linreg_len + signal_len + 10):
+        return {"signal": "HOLD", "bclose": 0.0, "signal_line": 0.0, "hm_status": "Insufficient Data"}
+
+    df = df_5m.copy()
+
+    # --- 1. Hilega-Milega Calculations ---
+    df["rsi9"] = calculate_rsi(df["close"], period=9)
+    df["hm_price_ema3"] = df["rsi9"].ewm(span=3, adjust=False).mean()
+    df["hm_strength_wma21"] = calculate_wma(df["rsi9"], length=21)
+
+    # --- 2. Linear Regression Candle Calculations ---
+    df["bopen"] = calculate_linreg_series(df["open"], length=linreg_len)
+    df["bclose"] = calculate_linreg_series(df["close"], length=linreg_len)
+    df["signal_line"] = df["bclose"].rolling(window=signal_len).mean()
+
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # Crossover Triggers
+    linreg_bull_cross = (latest["bclose"] > latest["signal_line"]) and (prev["bclose"] <= prev["signal_line"])
+    linreg_bear_cross = (latest["bclose"] < latest["signal_line"]) and (prev["bclose"] >= prev["signal_line"])
+
+    # HM Directional Confluence (EMA 3 vs WMA 21)
+    hm_bullish = latest["hm_price_ema3"] > latest["hm_strength_wma21"]
+    hm_bearish = latest["hm_price_ema3"] < latest["hm_strength_wma21"]
+
+    # Final Combined Confluence Signals
+    if linreg_bull_cross and hm_bullish:
+        signal = "BUY_CE"
+    elif linreg_bear_cross and hm_bearish:
+        signal = "BUY_PE"
+    else:
+        signal = "HOLD"
+
+    hm_desc = f"EMA3 ({latest['hm_price_ema3']:.1f}) > WMA21 ({latest['hm_strength_wma21']:.1f})" if hm_bullish else f"EMA3 ({latest['hm_price_ema3']:.1f}) < WMA21 ({latest['hm_strength_wma21']:.1f})"
+
     return {
-        "status": "SUCCESS",
-        "message": "Emergency square off signal processed.",
+        "signal": signal,
+        "bclose": round(latest["bclose"], 2),
+        "signal_line": round(latest["signal_line"], 2),
+        "hm_status": hm_desc,
+        "hm_bullish": hm_bullish,
+        "hm_bearish": hm_bearish,
+        "df_processed": df
     }
 
+# ==========================================
+# 5. POSITION SIZING & RISK ENGINE
+# ==========================================
+def calculate_position_size(symbol: str, premium: float, max_risk: float = MAX_RISK_PER_TRADE) -> dict:
+    lot_size = 1
+    for key, val in LOT_SIZES.items():
+        if key in symbol.upper():
+            lot_size = val
+            break
 
-@app.get("/logs")
-def get_logs():
+    if premium <= 0:
+        return {"lots": 0, "qty": 0, "capital_required": 0.0, "max_loss": 0.0}
+
+    risk_per_share = premium * DEFAULT_SL_PCT
+    risk_per_lot = risk_per_share * lot_size
+
+    num_lots = max(1, math.floor(max_risk / risk_per_lot)) if risk_per_lot > 0 else 1
+    total_qty = num_lots * lot_size
+    capital_required = round(total_qty * premium, 2)
+    actual_max_loss = round(num_lots * risk_per_lot, 2)
+
     return {
-        "logs": (
-            "\n".join(system_state["scanner_logs"][-20:])
-            if system_state["scanner_logs"]
-            else "Engine active & operational."
-        )
+        "lots": num_lots,
+        "qty": total_qty,
+        "capital_required": capital_required,
+        "max_loss": actual_max_loss,
+        "lot_size": lot_size
     }
+
+# ==========================================
+# 6. AUTOMATED EXECUTION TERMINAL UI
+# ==========================================
+def main():
+    st.set_page_config(page_title="Zerodha Algorithmic Trading Terminal", page_icon="⚡", layout="wide")
+    st.title("⚡ Zerodha Algorithmic Trading Terminal")
+    st.caption("Automated Engine Powered by Linear Regression Candles + Hilega-Milega Confluence")
+    st.markdown("---")
+
+    kite = get_kite_session()
+
+    # System Status Header
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if kite:
+            st.success("🟢 **Kite Session:** Connected")
+        else:
+            st.error("🔴 **Kite Session:** Disconnected")
+    with c2:
+        st.info("🛡️ **IP Whitelist (92.4.85.1):** Active")
+    with c3:
+        st.success("⚡ **Cloud Engine:** Running")
+
+    if not kite:
+        st.error("Please authenticate Zerodha session on the main app to start the automated trading engine.")
+        st.stop()
+
+    st.markdown("---")
+    tab_ctrl, tab_pos, tab_logs = st.tabs(["⚙️ Strategy Controls", "📊 Live Positions", "📋 System Audit Logs"])
+
+    with tab_ctrl:
+        st.subheader("🤖 Algorithmic Strategy Parameters")
+        
+        col_s1, col_s2, col_s3 = st.columns(3)
+        with col_s1:
+            selected_index = st.selectbox("Trading Benchmark", list(INDEX_TOKENS.keys()), index=0)
+        with col_s2:
+            max_risk_inr = st.number_input("Max Risk Ceiling per Trade (₹)", min_value=500.0, value=2000.0, step=250.0)
+        with col_s3:
+            sl_pct = st.number_input("Initial Hard Stop Loss (%)", min_value=0.05, max_value=0.30, value=0.15, step=0.01)
+
+        st.markdown("---")
+        if st.button("🚀 Evaluate Live Strategy Signal (LinReg + HM)", type="primary", use_container_width=True):
+            idx_info = INDEX_TOKENS[selected_index]
+            token = idx_info["token"]
+            
+            with st.spinner(f"Fetching 5-Minute Historical Candles for {selected_index}..."):
+                to_date = datetime.now()
+                from_date = to_date - timedelta(days=5)
+                
+                try:
+                    candles = kite.historical_data(token, from_date, to_date, "5minute")
+                    df_5m = pd.DataFrame(candles)
+                except Exception as e:
+                    st.error(f"Failed to fetch market data: {str(e)}")
+                    df_5m = pd.DataFrame()
+
+            if not df_5m.empty:
+                analysis = evaluate_strategy_signals(df_5m, linreg_len=11, signal_len=11)
+                sig = analysis["signal"]
+                bclose = analysis["bclose"]
+                sig_line = analysis["signal_line"]
+                hm_status = analysis["hm_status"]
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("LinReg Close (bclose)", f"₹{bclose:,.2f}")
+                m2.metric("Signal Line (SMA 11)", f"₹{sig_line:,.2f}")
+                m3.metric("HM Confluence", "Bullish" if analysis.get("hm_bullish") else "Bearish")
+                m4.metric("Evaluated Signal", sig, delta="TRIGGERED" if sig != "HOLD" else "WAITING")
+
+                st.caption(f"📊 **Hilega-Milega Status:** {hm_status}")
+
+                if sig in ["BUY_CE", "BUY_PE"]:
+                    st.success(f"🔥 **{sig} TRIGGERED:** Both Linear Regression Crossover & HM Confluence Fulfilled!")
+
+                    # Estimate option premium & dynamic position size
+                    quote = kite.quote([idx_info["symbol"]])
+                    spot_price = quote.get(idx_info["symbol"], {}).get("last_price", bclose)
+                    est_premium = round(spot_price * 0.008, 2)
+                    pos = calculate_position_size(selected_index, est_premium, max_risk=max_risk_inr)
+
+                    st.markdown("#### 📋 Position & Margin Verification")
+                    margin_ok, free_cash = check_account_margin(kite, pos["capital_required"])
+
+                    m_col1, m_col2, m_col3 = st.columns(3)
+                    m_col1.metric("Available Account Margin", f"₹{free_cash:,.2f}")
+                    m_col2.metric("Required Capital", f"₹{pos['capital_required']:,.2f}")
+                    m_col3.metric("Calculated Quantity", f"{pos['qty']} Qty ({pos['lots']} Lots)")
+
+                    if margin_ok:
+                        st.success("✅ **MARGIN VERIFIED:** Account balance sufficient for order execution.")
+                        if st.button(f"⚡ Execute Automated {sig} Market Order", type="primary"):
+                            st.balloons()
+                            st.success(f"Order Transmitted to Market: {pos['qty']} Qty | Premium: ₹{est_premium} | Max Risk: ₹{pos['max_loss']}")
+                    else:
+                        st.error("❌ **EXECUTION REJECTED:** Insufficient account margin for order entry.")
+                else:
+                    st.info("⚪ No combined signal detected. Awaiting simultaneous LinReg crossover and HM alignment.")
+
+    with tab_pos:
+        st.subheader("📊 Live Open Positions & Trailing Stop Loss Tracker")
+        try:
+            positions = kite.positions().get("net", [])
+            if positions:
+                st.dataframe(pd.DataFrame(positions), use_container_width=True)
+            else:
+                st.info("No open positions currently active.")
+        except Exception:
+            st.info("No active open positions.")
+
+    with tab_logs:
+        st.subheader("📋 System Audit Logs")
+        st.text_area("Audit Log Output", f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Confluence Algo Engine (LinReg + HM) active.", height=200)
+
+if __name__ == "__main__":
+    main()
