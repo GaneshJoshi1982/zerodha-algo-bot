@@ -140,52 +140,58 @@ async def set_token_endpoint(request: Request):
     return {"status": "ERROR", "message": "Missing token parameter"}, 400
 
 # ==========================================
-# 2. FIXED MARGINS & MANUAL ORDER PLACEMENT
+# 2. MARGINS & MANUAL ORDER PLACEMENT
 # ==========================================
 @app.api_route("/sync", methods=["GET", "POST"])
 @app.api_route("/margins", methods=["GET", "POST"])
 @app.api_route("/sync-margins", methods=["GET", "POST"])
 @app.api_route("/sync_margins", methods=["GET", "POST"])
+@app.api_route("/sync_account", methods=["GET", "POST"])
+@app.api_route("/sync-account", methods=["GET", "POST"])
+@app.api_route("/account", methods=["GET", "POST"])
+@app.api_route("/balance", methods=["GET", "POST"])
 def sync_margins_endpoint():
     token = get_saved_token()
     if not token:
-        return {"status": "ERROR", "message": "Unauthenticated"}, 401
+        return {"status": "ERROR", "message": "Unauthenticated", "balance": 0.0, "cash": 0.0, "margin": 0.0}
 
     try:
         kite = KiteConnect(api_key=API_KEY)
         kite.set_access_token(token)
         margins = kite.margins()
         
-        # Safely extract cash balance across different Zerodha margin schema structures
         equity_margins = margins.get("equity", {})
         available_obj = equity_margins.get("available", {})
+        net = equity_margins.get("net", 0.0)
         
         if isinstance(available_obj, dict):
-            cash = available_obj.get("live_balance", available_obj.get("cash", 0.0))
+            cash = available_obj.get("live_balance", available_obj.get("cash", net))
         else:
-            cash = float(available_obj) if available_obj else 0.0
+            cash = float(available_obj) if available_obj else net
 
-        if cash == 0.0:
-            cash = equity_margins.get("net", 0.0)
+        cash_val = round(float(cash), 2)
 
         return {
             "status": "SUCCESS",
-            "available_cash": round(float(cash), 2),
-            "cash": round(float(cash), 2),
-            "net": equity_margins.get("net", 0.0),
-            "margins": margins
+            "available_cash": cash_val,
+            "cash": cash_val,
+            "balance": cash_val,
+            "margin": cash_val,
+            "net": round(float(net), 2),
+            "margins": margins,
+            "data": margins
         }
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}, 500
+        return {"status": "ERROR", "message": str(e), "balance": 0.0, "cash": 0.0, "margin": 0.0}
 
 @app.api_route("/push_trade", methods=["GET", "POST"])
 @app.api_route("/push-trade", methods=["GET", "POST"])
+@app.api_route("/trade", methods=["GET", "POST"])
 async def push_trade_endpoint(request: Request):
     token = get_saved_token()
     if not token:
         return {"status": "ERROR", "message": "Unauthenticated"}, 401
 
-    # Safely handle dict OR list payloads sent from Streamlit
     body = {}
     try:
         raw_payload = await request.json()
@@ -283,7 +289,7 @@ def emergency_square_off():
 # Universal Fallback Route
 @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def catch_all_fallback(full_path: str, request: Request):
-    return {"status": "SUCCESS", "message": f"Path /{full_path} acknowledged."}
+    return {"status": "SUCCESS", "message": f"Path /{full_path} acknowledged.", "balance": 0.0, "cash": 0.0}
 
 # ==========================================
 # 3. UNCHANGED STRATEGY ENGINE (LINREG + HM)
