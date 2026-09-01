@@ -7,7 +7,7 @@ from pydantic import BaseModel
 app = FastAPI(title="Zerodha Algorithmic Trading Engine")
 
 # ==============================================================================
-# CONFIGURATION
+# CONFIGURATION & PERSISTENCE
 # ==============================================================================
 API_KEY = "magym2s4yk13gsze".strip()
 API_SECRET = "uxph73v40oemxff3c9xn48swqwctbfmf".strip()
@@ -22,7 +22,7 @@ system_state = {
 
 
 def load_token_from_disk():
-    """Restores cached session token from disk on server startup."""
+    """Auto-restores session token from persistent disk storage on boot."""
     if os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE, "r") as f:
@@ -40,7 +40,7 @@ def load_token_from_disk():
             system_state["zerodha_session_valid"] = False
 
 
-# Auto-load saved session on boot
+# Load token on server boot
 load_token_from_disk()
 
 
@@ -54,7 +54,7 @@ class TradeRequest(BaseModel):
 
 
 # ==============================================================================
-# ROUTER ENDPOINTS
+# API ROUTER ENDPOINTS
 # ==============================================================================
 
 
@@ -110,6 +110,7 @@ def zerodha_callback(request_token: str = Query(None)):
 
 @app.get("/sync")
 def sync_account():
+    """Fetches real-time equity margins and live balance from Zerodha."""
     if not system_state["zerodha_session_valid"]:
         raise HTTPException(
             status_code=400, detail="Zerodha session expired. Login required."
@@ -121,7 +122,7 @@ def sync_account():
         )
         m = kite.margins(segment="equity")
 
-        # Safely extract net balance regardless of dict wrapper format
+        # Handle both flat and nested margin response formats
         if "equity" in m and isinstance(m["equity"], dict):
             equity_data = m["equity"]
         else:
@@ -137,8 +138,29 @@ def sync_account():
         raise HTTPException(status_code=400, detail=f"Sync error: {str(e)}")
 
 
+@app.get("/positions")
+def get_positions():
+    """Fetches live open positions directly from Zerodha."""
+    if not system_state["zerodha_session_valid"]:
+        raise HTTPException(
+            status_code=400, detail="Zerodha session expired. Login required."
+        )
+
+    try:
+        kite = KiteConnect(
+            api_key=API_KEY, access_token=system_state["access_token"]
+        )
+        pos = kite.positions()
+        return {"status": "SUCCESS", "net": pos.get("net", [])}
+    except Exception as e:
+        raise HTTPException(
+            status_code=400, detail=f"Positions fetch error: {str(e)}"
+        )
+
+
 @app.post("/push_trade")
 def push_trade(trade: TradeRequest):
+    """Executes trades across NSE and NFO for NIFTY/BANKNIFTY/FINNIFTY."""
     if not system_state["zerodha_session_valid"]:
         raise HTTPException(
             status_code=400, detail="Zerodha session expired. Login required."
