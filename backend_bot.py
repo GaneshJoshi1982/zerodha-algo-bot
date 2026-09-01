@@ -2,7 +2,7 @@ from datetime import datetime
 import math
 import os
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from kiteconnect import KiteConnect
 import numpy as np
@@ -138,17 +138,15 @@ async def set_token_endpoint(request: Request):
     return {"status": "ERROR", "message": "Missing token parameter"}, 400
 
 # ==========================================
-# 2. MARGINS, ACCOUNT & POSITIONS ENDPOINTS
+# 2. MARGINS, SYNC & MANUAL TRADE ENDPOINTS
 # ==========================================
+@app.api_route("/sync", methods=["GET", "POST"])
+@app.api_route("/sync/", methods=["GET", "POST"])
 @app.api_route("/margins", methods=["GET", "POST"])
 @app.api_route("/margins/", methods=["GET", "POST"])
 @app.api_route("/sync-margins", methods=["GET", "POST"])
 @app.api_route("/sync_margins", methods=["GET", "POST"])
-@app.api_route("/get-margins", methods=["GET", "POST"])
-@app.api_route("/get_margins", methods=["GET", "POST"])
-@app.api_route("/sync-account", methods=["GET", "POST"])
-@app.api_route("/sync_account", methods=["GET", "POST"])
-def sync_margins():
+def sync_margins_endpoint():
     token = get_saved_token()
     if not token:
         return {"status": "ERROR", "message": "Unauthenticated"}, 401
@@ -165,15 +163,54 @@ def sync_margins():
             "available_cash": available_cash,
             "cash": available_cash,
             "net": equity_margins.get("net", 0.0),
-            "margins": margins
+            "margins": margins,
+            "data": margins
+        }
+    except Exception as e:
+        return {"status": "ERROR", "message": str(e)}, 500
+
+@app.api_route("/push_trade", methods=["GET", "POST"])
+@app.api_route("/push-trade", methods=["GET", "POST"])
+@app.api_route("/push_trade/", methods=["GET", "POST"])
+async def push_trade_endpoint(request: Request):
+    token = get_saved_token()
+    if not token:
+        return {"status": "ERROR", "message": "Unauthenticated"}, 401
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    symbol = body.get("symbol", "NIFTY")
+    action = body.get("action", "BUY_CE")
+    qty = body.get("qty", 65)
+
+    try:
+        kite = KiteConnect(api_key=API_KEY)
+        kite.set_access_token(token)
+
+        # Transmit Order to Zerodha Market
+        order_id = kite.place_order(
+            variety=kite.VARIETY_REGULAR,
+            exchange=kite.EXCHANGE_NFO,
+            tradingsymbol=symbol,
+            transaction_type=kite.TRANSACTION_TYPE_BUY,
+            quantity=int(qty),
+            product=kite.PRODUCT_MIS,
+            order_type=kite.ORDER_TYPE_MARKET
+        )
+
+        return {
+            "status": "SUCCESS",
+            "order_id": order_id,
+            "message": f"Manual Trade Executed: {symbol} ({action}) - Qty: {qty}"
         }
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}, 500
 
 @app.api_route("/positions", methods=["GET", "POST"])
 @app.api_route("/positions/", methods=["GET", "POST"])
-@app.api_route("/get-positions", methods=["GET", "POST"])
-@app.api_route("/get_positions", methods=["GET", "POST"])
 def get_positions():
     token = get_saved_token()
     if not token:
