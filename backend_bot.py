@@ -1,22 +1,19 @@
 from datetime import datetime
 import math
 import os
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from kiteconnect import KiteConnect
 import numpy as np
 import pandas as pd
-import requests
 
-# ==========================================
-# 1. CONFIGURATION & CONSTANTS
-# ==========================================
 API_KEY = "magym2s4yk13gsze"
 API_SECRET = "uxph73v40oemxff3c9xn48swqwctbfmf"
 TOKEN_FILE = "access_token.txt"
 
-MAX_RISK_PER_TRADE = 2000.0  # Max loss capped at ₹2,000 per trade
-DEFAULT_SL_PCT = 0.15        # 15% Initial Hard Stop Loss
+MAX_RISK_PER_TRADE = 2000.0
+DEFAULT_SL_PCT = 0.15
 
 LOT_SIZES = {
     "NIFTY": 65,
@@ -36,7 +33,6 @@ INDEX_TOKENS = {
 
 app = FastAPI(title="Zerodha Algorithmic Trading Bot Backend")
 
-# Enable CORS for Streamlit Frontend Requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,71 +41,109 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==========================================
-# 2. REST API ENDPOINTS (PORT 10000)
-# ==========================================
-@app.get("/health")
-@app.get("/health/")
-def health_check():
-    access_token = None
+def get_saved_token():
     if os.path.exists(TOKEN_FILE):
         with open(TOKEN_FILE, "r") as f:
-            access_token = f.read().strip()
+            t = f.read().strip()
+            if t:
+                return t
+    return None
 
-    is_authenticated = False
-    if access_token:
+def save_token(token_str: str):
+    with open(TOKEN_FILE, "w") as f:
+        f.write(token_str.strip())
+
+# ==========================================
+# 1. ZERODHA CALLBACK & AUTH ENDPOINTS
+# ==========================================
+@app.api_route("/callback", methods=["GET", "POST"])
+@app.api_route("/callback/", methods=["GET", "POST"])
+async def zerodha_callback(request: Request):
+    request_token = request.query_params.get("request_token")
+    if not request_token:
+        try:
+            body = await request.json()
+            request_token = body.get("request_token")
+        except Exception:
+            pass
+
+    if not request_token:
+        return HTMLResponse("<h2>❌ Error: Missing request_token from Zerodha.</h2>", status_code=400)
+
+    try:
+        kite = KiteConnect(api_key=API_KEY)
+        session_data = kite.generate_session(request_token, api_secret=API_SECRET)
+        access_token = session_data["access_token"]
+        save_token(access_token)
+
+        html_content = """
+        <html>
+            <body style="font-family: Arial; text-align: center; padding-top: 50px;">
+                <h1 style="color: green;">✅ Zerodha Authentication Successful!</h1>
+                <p>Access Token has been generated and linked to your Oracle VPS Trading Bot.</p>
+                <p>You can close this tab and return to your Streamlit Terminal.</p>
+            </body>
+        </html>
+        """
+        return HTMLResponse(content=html_content, status_code=200)
+    except Exception as e:
+        return HTMLResponse(f"<h2>❌ Session Generation Failed: {str(e)}</h2>", status_code=500)
+
+@app.api_route("/health", methods=["GET", "POST"])
+@app.api_route("/health/", methods=["GET", "POST"])
+def health_check():
+    token = get_saved_token()
+    is_auth = False
+    if token:
         try:
             kite = KiteConnect(api_key=API_KEY)
-            kite.set_access_token(access_token)
+            kite.set_access_token(token)
             kite.profile()
-            is_authenticated = True
+            is_auth = True
         except Exception:
-            is_authenticated = False
-
-    status = "GREEN" if is_authenticated else "RED"
-    msg = "All Systems Active & Linked" if is_authenticated else "Disconnected / Login Required"
+            is_auth = False
 
     return {
-        "status": status,
-        "message": msg,
+        "status": "GREEN" if is_auth else "RED",
+        "message": "All Systems Active & Linked" if is_auth else "Disconnected / Login Required",
         "checks": {
-            "login_authenticated": is_authenticated,
+            "login_authenticated": is_auth,
             "ip_whitelisted": True,
             "service_active": True
         },
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
 
-@app.get("/get-token")
-@app.get("/get-token/")
-def get_token():
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE, "r") as f:
-            token = f.read().strip()
-            if token:
-                return {"status": "SUCCESS", "access_token": token}
-    raise HTTPException(status_code=404, detail="No active session token")
+@app.api_route("/get-token", methods=["GET", "POST"])
+@app.api_route("/get_token", methods=["GET", "POST"])
+@app.api_route("/get-token/", methods=["GET", "POST"])
+@app.api_route("/get_token/", methods=["GET", "POST"])
+def get_token_endpoint():
+    token = get_saved_token()
+    if token:
+        return {"status": "SUCCESS", "access_token": token, "token": token}
+    return {"status": "ERROR", "message": "No active session token"}, 404
 
 @app.api_route("/set-token", methods=["GET", "POST"])
+@app.api_route("/set_token", methods=["GET", "POST"])
 @app.api_route("/set-token/", methods=["GET", "POST"])
-async def set_token(request: Request, access_token: str = Query(None)):
-    token = access_token
+@app.api_route("/set_token/", methods=["GET", "POST"])
+async def set_token_endpoint(request: Request):
+    token = request.query_params.get("access_token") or request.query_params.get("token")
     if not token:
         try:
             body = await request.json()
-            token = body.get("access_token") or body.get("token")
+            token = body.get("access_token") or body.get("token") or body.get("request_token")
         except Exception:
             pass
 
     if token:
-        with open(TOKEN_FILE, "w") as f:
-            f.write(token.strip())
+        save_token(token)
         return {"status": "SUCCESS", "message": "Token updated successfully"}
-    
-    raise HTTPException(status_code=400, detail="Missing access_token parameter")
+    return {"status": "ERROR", "message": "Missing token parameter"}, 400
 
 # ==========================================
-# 3. STRATEGY ENGINE (LINREG + HM)
+# 2. STRATEGY ENGINE (LINREG + HM CONFLUENCE)
 # ==========================================
 def calculate_rsi(series: pd.Series, period: int = 9) -> pd.Series:
     delta = series.diff()
@@ -141,24 +175,19 @@ def calculate_linreg_series(series: pd.Series, length: int = 11) -> pd.Series:
 
     return series.rolling(window=length).apply(get_linreg_val, raw=True)
 
-@app.get("/evaluate-signal")
-@app.get("/evaluate-signal/")
-def evaluate_signal(symbol: str = Query("NIFTY")):
+@app.api_route("/evaluate-signal", methods=["GET", "POST"])
+@app.api_route("/evaluate_signal", methods=["GET", "POST"])
+def evaluate_signal(symbol: str = "NIFTY"):
     symbol_key = symbol.upper()
-    if symbol_key not in INDEX_TOKENS:
-        raise HTTPException(status_code=400, detail="Invalid symbol")
-
-    if not os.path.exists(TOKEN_FILE):
-        raise HTTPException(status_code=401, detail="Unauthenticated")
-
-    with open(TOKEN_FILE, "r") as f:
-        token = f.read().strip()
+    token = get_saved_token()
+    if not token:
+        return {"status": "ERROR", "message": "Unauthenticated"}, 401
 
     try:
         kite = KiteConnect(api_key=API_KEY)
         kite.set_access_token(token)
 
-        idx_info = INDEX_TOKENS[symbol_key]
+        idx_info = INDEX_TOKENS.get(symbol_key, INDEX_TOKENS["NIFTY"])
         to_date = datetime.now()
         from_date = to_date - pd.Timedelta(days=5)
 
@@ -166,14 +195,14 @@ def evaluate_signal(symbol: str = Query("NIFTY")):
         df = pd.DataFrame(candles)
 
         if df.empty or len(df) < 30:
-            raise HTTPException(status_code=400, detail="Insufficient candle data")
+            return {"status": "ERROR", "message": "Insufficient candle data"}, 400
 
-        # 1. Hilega-Milega
+        # Hilega-Milega
         df["rsi9"] = calculate_rsi(df["close"], period=9)
         df["hm_price_ema3"] = df["rsi9"].ewm(span=3, adjust=False).mean()
         df["hm_strength_wma21"] = calculate_wma(df["rsi9"], length=21)
 
-        # 2. Linear Regression Candles
+        # Linear Regression Candles
         df["bopen"] = calculate_linreg_series(df["open"], length=11)
         df["bclose"] = calculate_linreg_series(df["close"], length=11)
         df["signal_line"] = df["bclose"].rolling(window=11).mean()
@@ -206,4 +235,4 @@ def evaluate_signal(symbol: str = Query("NIFTY")):
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "ERROR", "message": str(e)}, 500
