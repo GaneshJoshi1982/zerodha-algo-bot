@@ -14,29 +14,43 @@ st.set_page_config(
 )
 st.title("⚡ Zerodha Algorithmic Trading Terminal")
 
-# Process incoming token redirected from Zerodha and immediately clean URL
+# Read health status first to check existing session
+session_authenticated = False
+try:
+    health_check = requests.get(f"{BACKEND_URL}/health", timeout=3).json()
+    session_authenticated = health_check.get("checks", {}).get(
+        "login_authenticated", False
+    )
+except Exception:
+    pass
+
+# Handle OAuth redirect token only if not already authenticated
 if "request_token" in st.query_params:
     token = st.query_params["request_token"]
-    st.info("🔄 Authenticating session with Oracle Backend...")
 
-    try:
-        res = requests.get(
-            f"{BACKEND_URL}/callback",
-            params={"request_token": token},
-            timeout=10,
-        )
+    if session_authenticated:
         st.query_params.clear()
+        st.rerun()
+    else:
+        st.info("🔄 Authenticating session with Oracle Backend...")
+        try:
+            res = requests.get(
+                f"{BACKEND_URL}/callback",
+                params={"request_token": token},
+                timeout=10,
+            )
+            st.query_params.clear()
 
-        if res.status_code == 200:
-            st.success("✅ Connected to Zerodha successfully!")
-            st.rerun()
-        else:
-            st.error(f"❌ Backend Authentication Failure: {res.text}")
-    except Exception as e:
-        st.query_params.clear()
-        st.error(f"❌ Connection to Oracle Cloud failed: {e}")
+            if res.status_code == 200:
+                st.success("✅ Connected to Zerodha successfully!")
+                st.rerun()
+            else:
+                st.error(f"❌ Backend Auth Failure: {res.text}")
+        except Exception as e:
+            st.query_params.clear()
+            st.error(f"❌ Connection to Oracle Cloud failed: {e}")
 
-# Fetch live system health status from Oracle Cloud
+# Fetch live system health status
 health_data = {}
 try:
     res = requests.get(f"{BACKEND_URL}/health", timeout=3).json()
