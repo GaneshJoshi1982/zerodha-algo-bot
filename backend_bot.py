@@ -40,7 +40,7 @@ def load_token_from_disk():
             system_state["zerodha_session_valid"] = False
 
 
-# Auto-load token on server boot
+# Auto-load saved session on boot
 load_token_from_disk()
 
 
@@ -122,12 +122,10 @@ def sync_account():
         margins = kite.margins(segment="equity")
         equity_data = margins.get("equity", {})
 
-        # Extract cash margin correctly across Zerodha dict structures
-        available_margin = equity_data.get("net", 0)
-        if available_margin == 0:
-            available_margin = (
-                equity_data.get("available", {}).get("live_balance", 0)
-            )
+        # Access exact net cash balance field returned by Kite API
+        available_margin = equity_data.get(
+            "net", equity_data.get("available", {}).get("live_balance", 0)
+        )
 
         return {"status": "SUCCESS", "margin": available_margin}
     except Exception as e:
@@ -189,5 +187,5 @@ def square_off():
 @app.get("/logs")
 def get_logs():
     return {
-        "logs": f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Engine Active | Session: {system_state['zerodha_session_valid']}"
+        "logs": f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Engine Active | Session Valid: {system_state['zerodha_session_valid']}"
     }
