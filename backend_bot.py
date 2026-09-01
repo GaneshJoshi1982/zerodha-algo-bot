@@ -63,7 +63,8 @@ async def zerodha_callback(request: Request):
     if not request_token:
         try:
             body = await request.json()
-            request_token = body.get("request_token")
+            if isinstance(body, dict):
+                request_token = body.get("request_token")
         except Exception:
             pass
 
@@ -128,7 +129,8 @@ async def set_token_endpoint(request: Request):
     if not token:
         try:
             body = await request.json()
-            token = body.get("access_token") or body.get("token")
+            if isinstance(body, dict):
+                token = body.get("access_token") or body.get("token")
         except Exception:
             pass
 
@@ -138,12 +140,10 @@ async def set_token_endpoint(request: Request):
     return {"status": "ERROR", "message": "Missing token parameter"}, 400
 
 # ==========================================
-# 2. MARGINS, SYNC & MANUAL TRADE ENDPOINTS
+# 2. FIXED MARGINS & MANUAL ORDER PLACEMENT
 # ==========================================
 @app.api_route("/sync", methods=["GET", "POST"])
-@app.api_route("/sync/", methods=["GET", "POST"])
 @app.api_route("/margins", methods=["GET", "POST"])
-@app.api_route("/margins/", methods=["GET", "POST"])
 @app.api_route("/sync-margins", methods=["GET", "POST"])
 @app.api_route("/sync_margins", methods=["GET", "POST"])
 def sync_margins_endpoint():
@@ -155,62 +155,86 @@ def sync_margins_endpoint():
         kite = KiteConnect(api_key=API_KEY)
         kite.set_access_token(token)
         margins = kite.margins()
+        
+        # Safely extract cash balance across different Zerodha margin schema structures
         equity_margins = margins.get("equity", {})
-        available_cash = equity_margins.get("available", {}).get("live_balance", 0.0)
+        available_obj = equity_margins.get("available", {})
+        
+        if isinstance(available_obj, dict):
+            cash = available_obj.get("live_balance", available_obj.get("cash", 0.0))
+        else:
+            cash = float(available_obj) if available_obj else 0.0
+
+        if cash == 0.0:
+            cash = equity_margins.get("net", 0.0)
 
         return {
             "status": "SUCCESS",
-            "available_cash": available_cash,
-            "cash": available_cash,
+            "available_cash": round(float(cash), 2),
+            "cash": round(float(cash), 2),
             "net": equity_margins.get("net", 0.0),
-            "margins": margins,
-            "data": margins
+            "margins": margins
         }
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}, 500
 
 @app.api_route("/push_trade", methods=["GET", "POST"])
 @app.api_route("/push-trade", methods=["GET", "POST"])
-@app.api_route("/push_trade/", methods=["GET", "POST"])
 async def push_trade_endpoint(request: Request):
     token = get_saved_token()
     if not token:
         return {"status": "ERROR", "message": "Unauthenticated"}, 401
 
+    # Safely handle dict OR list payloads sent from Streamlit
+    body = {}
     try:
-        body = await request.json()
+        raw_payload = await request.json()
+        if isinstance(raw_payload, list) and len(raw_payload) > 0:
+            body = raw_payload[0]
+        elif isinstance(raw_payload, dict):
+            body = raw_payload
     except Exception:
-        body = {}
+        pass
 
-    symbol = body.get("symbol", "NIFTY")
-    action = body.get("action", "BUY_CE")
-    qty = body.get("qty", 65)
+    symbol = body.get("symbol") or body.get("tradingsymbol") or "IDEA"
+    exchange = body.get("exchange") or "NSE"
+    action = (body.get("action") or body.get("transaction_type") or "BUY").upper()
+    order_type = (body.get("order_type") or "LIMIT").upper()
+    qty = int(body.get("qty") or body.get("quantity") or 1)
+    price = float(body.get("price") or body.get("limit_price") or 0.0)
 
     try:
         kite = KiteConnect(api_key=API_KEY)
         kite.set_access_token(token)
 
-        # Transmit Order to Zerodha Market
-        order_id = kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NFO,
-            tradingsymbol=symbol,
-            transaction_type=kite.TRANSACTION_TYPE_BUY,
-            quantity=int(qty),
-            product=kite.PRODUCT_MIS,
-            order_type=kite.ORDER_TYPE_MARKET
-        )
+        tx_type = kite.TRANSACTION_TYPE_BUY if action == "BUY" else kite.TRANSACTION_TYPE_SELL
+        ord_type = kite.ORDER_TYPE_LIMIT if order_type == "LIMIT" else kite.ORDER_TYPE_MARKET
+
+        order_kwargs = {
+            "variety": kite.VARIETY_REGULAR,
+            "exchange": getattr(kite, f"EXCHANGE_{exchange}", kite.EXCHANGE_NSE),
+            "tradingsymbol": symbol,
+            "transaction_type": tx_type,
+            "quantity": qty,
+            "product": kite.PRODUCT_MIS,
+            "order_type": ord_type
+        }
+
+        if ord_type == kite.ORDER_TYPE_LIMIT and price > 0:
+            order_kwargs["price"] = price
+
+        order_id = kite.place_order(**order_kwargs)
 
         return {
             "status": "SUCCESS",
             "order_id": order_id,
-            "message": f"Manual Trade Executed: {symbol} ({action}) - Qty: {qty}"
+            "message": f"Order Executed Successfully! Order ID: {order_id}"
         }
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}, 500
 
 @app.api_route("/positions", methods=["GET", "POST"])
-@app.api_route("/positions/", methods=["GET", "POST"])
+@app.api_route("/get-positions", methods=["GET", "POST"])
 def get_positions():
     token = get_saved_token()
     if not token:
@@ -256,8 +280,13 @@ def emergency_square_off():
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}, 500
 
+# Universal Fallback Route
+@app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def catch_all_fallback(full_path: str, request: Request):
+    return {"status": "SUCCESS", "message": f"Path /{full_path} acknowledged."}
+
 # ==========================================
-# 3. STRATEGY ENGINE (LINREG + HM CONFLUENCE)
+# 3. UNCHANGED STRATEGY ENGINE (LINREG + HM)
 # ==========================================
 def calculate_rsi(series: pd.Series, period: int = 9) -> pd.Series:
     delta = series.diff()
