@@ -1,7 +1,8 @@
 from datetime import datetime
 import math
 import os
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from kiteconnect import KiteConnect
 import numpy as np
 import pandas as pd
@@ -35,10 +36,20 @@ INDEX_TOKENS = {
 
 app = FastAPI(title="Zerodha Algorithmic Trading Bot Backend")
 
+# Enable CORS for Streamlit Frontend Requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ==========================================
-# 2. REST API ENDPOINTS (FOR UVICORN PORT 10000)
+# 2. REST API ENDPOINTS (PORT 10000)
 # ==========================================
 @app.get("/health")
+@app.get("/health/")
 def health_check():
     access_token = None
     if os.path.exists(TOKEN_FILE):
@@ -70,21 +81,32 @@ def health_check():
     }
 
 @app.get("/get-token")
+@app.get("/get-token/")
 def get_token():
     if os.path.exists(TOKEN_FILE):
         with open(TOKEN_FILE, "r") as f:
             token = f.read().strip()
-            return {"status": "SUCCESS", "access_token": token}
+            if token:
+                return {"status": "SUCCESS", "access_token": token}
     raise HTTPException(status_code=404, detail="No active session token")
 
-@app.post("/set-token")
-def set_token(payload: dict):
-    token = payload.get("access_token")
+@app.api_route("/set-token", methods=["GET", "POST"])
+@app.api_route("/set-token/", methods=["GET", "POST"])
+async def set_token(request: Request, access_token: str = Query(None)):
+    token = access_token
+    if not token:
+        try:
+            body = await request.json()
+            token = body.get("access_token") or body.get("token")
+        except Exception:
+            pass
+
     if token:
         with open(TOKEN_FILE, "w") as f:
-            f.write(token)
-        return {"status": "SUCCESS", "message": "Token updated"}
-    raise HTTPException(status_code=400, detail="Invalid token")
+            f.write(token.strip())
+        return {"status": "SUCCESS", "message": "Token updated successfully"}
+    
+    raise HTTPException(status_code=400, detail="Missing access_token parameter")
 
 # ==========================================
 # 3. STRATEGY ENGINE (LINREG + HM)
@@ -120,6 +142,7 @@ def calculate_linreg_series(series: pd.Series, length: int = 11) -> pd.Series:
     return series.rolling(window=length).apply(get_linreg_val, raw=True)
 
 @app.get("/evaluate-signal")
+@app.get("/evaluate-signal/")
 def evaluate_signal(symbol: str = Query("NIFTY")):
     symbol_key = symbol.upper()
     if symbol_key not in INDEX_TOKENS:
