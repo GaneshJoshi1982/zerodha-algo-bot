@@ -8,6 +8,9 @@ from kiteconnect import KiteConnect
 import numpy as np
 import pandas as pd
 
+# ==========================================
+# 1. CONFIGURATION & CONSTANTS
+# ==========================================
 API_KEY = "magym2s4yk13gsze"
 API_SECRET = "uxph73v40oemxff3c9xn48swqwctbfmf"
 TOKEN_FILE = "access_token.txt"
@@ -54,7 +57,7 @@ def save_token(token_str: str):
         f.write(token_str.strip())
 
 # ==========================================
-# 1. AUTH & HEALTH ENDPOINTS
+# 2. AUTH & HEALTH ENDPOINTS
 # ==========================================
 @app.api_route("/callback", methods=["GET", "POST"])
 @app.api_route("/callback/", methods=["GET", "POST"])
@@ -140,7 +143,7 @@ async def set_token_endpoint(request: Request):
     return {"status": "ERROR", "message": "Missing token parameter"}, 400
 
 # ==========================================
-# 2. MARGINS & MANUAL ORDER PLACEMENT
+# 3. MARGINS, POSITIONS & ORDER EXECUTION
 # ==========================================
 @app.api_route("/sync", methods=["GET", "POST"])
 @app.api_route("/margins", methods=["GET", "POST"])
@@ -194,20 +197,36 @@ async def push_trade_endpoint(request: Request):
 
     body = {}
     try:
-        raw_payload = await request.json()
-        if isinstance(raw_payload, list) and len(raw_payload) > 0:
-            body = raw_payload[0]
-        elif isinstance(raw_payload, dict):
-            body = raw_payload
+        if request.method == "POST":
+            raw_payload = await request.json()
+            if isinstance(raw_payload, list):
+                for item in raw_payload:
+                    if isinstance(item, dict):
+                        body.update(item)
+            elif isinstance(raw_payload, dict):
+                body = raw_payload
+        else:
+            body = dict(request.query_params)
     except Exception:
-        pass
+        body = dict(request.query_params)
+
+    if not body:
+        body = dict(request.query_params)
 
     symbol = body.get("symbol") or body.get("tradingsymbol") or "IDEA"
     exchange = body.get("exchange") or "NSE"
     action = (body.get("action") or body.get("transaction_type") or "BUY").upper()
     order_type = (body.get("order_type") or "LIMIT").upper()
-    qty = int(body.get("qty") or body.get("quantity") or 1)
-    price = float(body.get("price") or body.get("limit_price") or 0.0)
+    
+    try:
+        qty = int(body.get("qty") or body.get("quantity") or 1)
+    except Exception:
+        qty = 1
+
+    try:
+        price = float(body.get("price") or body.get("limit_price") or 0.0)
+    except Exception:
+        price = 0.0
 
     try:
         kite = KiteConnect(api_key=API_KEY)
@@ -286,13 +305,12 @@ def emergency_square_off():
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}, 500
 
-# Universal Fallback Route
 @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def catch_all_fallback(full_path: str, request: Request):
     return {"status": "SUCCESS", "message": f"Path /{full_path} acknowledged.", "balance": 0.0, "cash": 0.0}
 
 # ==========================================
-# 3. UNCHANGED STRATEGY ENGINE (LINREG + HM)
+# 4. STRATEGY ENGINE (LINREG + HM CONFLUENCE)
 # ==========================================
 def calculate_rsi(series: pd.Series, period: int = 9) -> pd.Series:
     delta = series.diff()
