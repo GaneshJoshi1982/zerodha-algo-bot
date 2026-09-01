@@ -106,7 +106,7 @@ def health_check():
         except Exception:
             is_auth = False
 
-    return {
+    return JSONResponse(content={
         "status": "GREEN" if is_auth else "RED",
         "message": "All Systems Active & Linked" if is_auth else "Disconnected / Login Required",
         "checks": {
@@ -115,15 +115,15 @@ def health_check():
             "service_active": True
         },
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
+    })
 
 @app.api_route("/get-token", methods=["GET", "POST"])
 @app.api_route("/get_token", methods=["GET", "POST"])
 def get_token_endpoint():
     token = get_saved_token()
     if token:
-        return {"status": "SUCCESS", "access_token": token, "token": token}
-    return {"status": "ERROR", "message": "No active session token"}, 404
+        return JSONResponse(content={"status": "SUCCESS", "access_token": token, "token": token})
+    return JSONResponse(content={"status": "ERROR", "message": "No active session token"}, status_code=404)
 
 @app.api_route("/set-token", methods=["GET", "POST"])
 @app.api_route("/set_token", methods=["GET", "POST"])
@@ -139,8 +139,8 @@ async def set_token_endpoint(request: Request):
 
     if token:
         save_token(token)
-        return {"status": "SUCCESS", "message": "Token updated successfully"}
-    return {"status": "ERROR", "message": "Missing token parameter"}, 400
+        return JSONResponse(content={"status": "SUCCESS", "message": "Token updated successfully"})
+    return JSONResponse(content={"status": "ERROR", "message": "Missing token parameter"}, status_code=400)
 
 # ==========================================
 # 3. MARGINS, POSITIONS & ORDER EXECUTION
@@ -156,7 +156,7 @@ async def set_token_endpoint(request: Request):
 def sync_margins_endpoint():
     token = get_saved_token()
     if not token:
-        return {"status": "ERROR", "message": "Unauthenticated", "balance": 0.0, "cash": 0.0, "margin": 0.0}
+        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated", "balance": 0.0, "cash": 0.0, "margin": 0.0}, status_code=401)
 
     try:
         kite = KiteConnect(api_key=API_KEY)
@@ -174,7 +174,7 @@ def sync_margins_endpoint():
 
         cash_val = round(float(cash), 2)
 
-        return {
+        return JSONResponse(content={
             "status": "SUCCESS",
             "available_cash": cash_val,
             "cash": cash_val,
@@ -183,9 +183,9 @@ def sync_margins_endpoint():
             "net": round(float(net), 2),
             "margins": margins,
             "data": margins
-        }
+        })
     except Exception as e:
-        return {"status": "ERROR", "message": str(e), "balance": 0.0, "cash": 0.0, "margin": 0.0}
+        return JSONResponse(content={"status": "ERROR", "message": str(e), "balance": 0.0, "cash": 0.0, "margin": 0.0}, status_code=500)
 
 @app.api_route("/push_trade", methods=["GET", "POST"])
 @app.api_route("/push-trade", methods=["GET", "POST"])
@@ -193,7 +193,7 @@ def sync_margins_endpoint():
 async def push_trade_endpoint(request: Request):
     token = get_saved_token()
     if not token:
-        return {"status": "ERROR", "message": "Unauthenticated"}, 401
+        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated"}, status_code=401)
 
     body = {}
     try:
@@ -250,35 +250,35 @@ async def push_trade_endpoint(request: Request):
 
         order_id = kite.place_order(**order_kwargs)
 
-        return {
+        return JSONResponse(content={
             "status": "SUCCESS",
             "order_id": order_id,
             "message": f"Order Executed Successfully! Order ID: {order_id}"
-        }
+        })
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}, 500
+        return JSONResponse(content={"status": "ERROR", "message": str(e)}, status_code=500)
 
 @app.api_route("/positions", methods=["GET", "POST"])
 @app.api_route("/get-positions", methods=["GET", "POST"])
 def get_positions():
     token = get_saved_token()
     if not token:
-        return {"status": "ERROR", "message": "Unauthenticated"}, 401
+        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated"}, status_code=401)
 
     try:
         kite = KiteConnect(api_key=API_KEY)
         kite.set_access_token(token)
         positions = kite.positions()
-        return {"status": "SUCCESS", "positions": positions.get("net", [])}
+        return JSONResponse(content={"status": "SUCCESS", "positions": positions.get("net", [])})
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}, 500
+        return JSONResponse(content={"status": "ERROR", "message": str(e)}, status_code=500)
 
 @app.api_route("/square-off", methods=["GET", "POST"])
 @app.api_route("/square_off", methods=["GET", "POST"])
 def emergency_square_off():
     token = get_saved_token()
     if not token:
-        return {"status": "ERROR", "message": "Unauthenticated"}, 401
+        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated"}, status_code=401)
 
     try:
         kite = KiteConnect(api_key=API_KEY)
@@ -301,13 +301,13 @@ def emergency_square_off():
                 )
                 closed_count += 1
 
-        return {"status": "SUCCESS", "message": f"Squared off {closed_count} positions successfully."}
+        return JSONResponse(content={"status": "SUCCESS", "message": f"Squared off {closed_count} positions successfully."})
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}, 500
+        return JSONResponse(content={"status": "ERROR", "message": str(e)}, status_code=500)
 
 @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def catch_all_fallback(full_path: str, request: Request):
-    return {"status": "SUCCESS", "message": f"Path /{full_path} acknowledged.", "balance": 0.0, "cash": 0.0}
+    return JSONResponse(content={"status": "SUCCESS", "message": f"Path /{full_path} acknowledged.", "balance": 0.0, "cash": 0.0})
 
 # ==========================================
 # 4. STRATEGY ENGINE (LINREG + HM CONFLUENCE)
@@ -348,7 +348,7 @@ def evaluate_signal(symbol: str = "NIFTY"):
     symbol_key = symbol.upper()
     token = get_saved_token()
     if not token:
-        return {"status": "ERROR", "message": "Unauthenticated"}, 401
+        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated"}, status_code=401)
 
     try:
         kite = KiteConnect(api_key=API_KEY)
@@ -362,7 +362,7 @@ def evaluate_signal(symbol: str = "NIFTY"):
         df = pd.DataFrame(candles)
 
         if df.empty or len(df) < 30:
-            return {"status": "ERROR", "message": "Insufficient candle data"}, 400
+            return JSONResponse(content={"status": "ERROR", "message": "Insufficient candle data"}, status_code=400)
 
         # Hilega-Milega
         df["rsi9"] = calculate_rsi(df["close"], period=9)
@@ -390,7 +390,7 @@ def evaluate_signal(symbol: str = "NIFTY"):
         else:
             signal = "HOLD"
 
-        return {
+        return JSONResponse(content={
             "status": "SUCCESS",
             "symbol": symbol_key,
             "signal": signal,
@@ -399,7 +399,7 @@ def evaluate_signal(symbol: str = "NIFTY"):
             "hm_bullish": bool(hm_bullish),
             "hm_bearish": bool(hm_bearish),
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
+        })
 
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}, 500
+        return JSONResponse(content={"status": "ERROR", "message": str(e)}, status_code=500)
