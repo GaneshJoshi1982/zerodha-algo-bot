@@ -14,7 +14,7 @@ st.set_page_config(
 )
 st.title("⚡ Zerodha Algorithmic Trading Terminal")
 
-# Pre-check health status to prevent redirect loops
+# System authentication state check
 session_authenticated = False
 try:
     health_check = requests.get(f"{BACKEND_URL}/health", timeout=3).json()
@@ -24,7 +24,7 @@ try:
 except Exception:
     pass
 
-# Handle OAuth redirect token from Zerodha login
+# Handle OAuth redirect token from Zerodha login page
 if "request_token" in st.query_params:
     token = st.query_params["request_token"]
 
@@ -50,7 +50,7 @@ if "request_token" in st.query_params:
             st.query_params.clear()
             st.error(f"❌ Connection to Oracle Cloud failed: {e}")
 
-# Render real-time system metrics
+# Render system metrics bar
 health_data = {}
 try:
     res = requests.get(f"{BACKEND_URL}/health", timeout=3).json()
@@ -94,8 +94,13 @@ except Exception:
 
 st.divider()
 
-tab1, tab2, tab3 = st.tabs(
-    ["⚙️ Strategy Controls", "🚀 Push Manual Trade", "📋 System Audit Logs"]
+tab1, tab2, tab3, tab4 = st.tabs(
+    [
+        "⚙️ Strategy Controls",
+        "🚀 Push Manual Trade",
+        "📊 Live Positions",
+        "📋 System Audit Logs",
+    ]
 )
 
 with tab1:
@@ -165,6 +170,19 @@ with tab2:
                 st.error(f"Trade Execution Failed: {e}")
 
 with tab3:
+    st.subheader("📊 Live Open Positions")
+    if st.button("🔄 Refresh Positions"):
+        try:
+            res = requests.get(f"{BACKEND_URL}/positions", timeout=5).json()
+            net_positions = res.get("net", [])
+            if net_positions:
+                st.dataframe(net_positions)
+            else:
+                st.info("No open positions currently active.")
+        except Exception as e:
+            st.error(f"Error fetching live positions: {e}")
+
+with tab4:
     st.subheader("System Event Logs")
     if st.button("Refresh Logs"):
         try:
