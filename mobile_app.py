@@ -14,7 +14,7 @@ st.set_page_config(
 )
 st.title("⚡ Zerodha Algorithmic Trading Terminal")
 
-# Read health status first to check existing session
+# Pre-check health status to avoid re-triggering callback loops
 session_authenticated = False
 try:
     health_check = requests.get(f"{BACKEND_URL}/health", timeout=3).json()
@@ -24,7 +24,7 @@ try:
 except Exception:
     pass
 
-# Handle OAuth redirect token only if not already authenticated
+# Process OAuth redirect token from Zerodha
 if "request_token" in st.query_params:
     token = st.query_params["request_token"]
 
@@ -50,7 +50,7 @@ if "request_token" in st.query_params:
             st.query_params.clear()
             st.error(f"❌ Connection to Oracle Cloud failed: {e}")
 
-# Fetch live system health status
+# Render live system metrics
 health_data = {}
 try:
     res = requests.get(f"{BACKEND_URL}/health", timeout=3).json()
@@ -116,31 +116,36 @@ with tab1:
         if st.button("🔄 Sync Account & Margins"):
             try:
                 sy = requests.get(f"{BACKEND_URL}/sync", timeout=5).json()
-                st.success(f"Available Equity Margin: ₹{sy.get('margin')}")
+                if sy.get("status") == "SUCCESS":
+                    st.success(f"Available Equity Margin: ₹{sy.get('margin')}")
+                else:
+                    st.error(f"Sync Failed: {sy}")
             except Exception as e:
-                st.error(f"Sync Failed: {e}")
+                st.error(f"Sync Request Error: {e}")
 
 with tab2:
     st.subheader("🚀 Push Manual Signal / Instant Trade")
     with st.form("push_trade_form"):
         col_t1, col_t2 = st.columns(2)
         with col_t1:
-            symbol = st.text_input("Trading Symbol", value="NIFTY26AUG24000CE")
+            exchange = st.selectbox("Exchange", ["NSE", "NFO"])
+            symbol = st.text_input("Trading Symbol", value="IDEA")
             transaction_type = st.radio(
                 "Transaction Type", ["BUY", "SELL"], horizontal=True
             )
         with col_t2:
             quantity = st.number_input(
-                "Quantity", min_value=1, value=15, step=1
+                "Quantity", min_value=1, value=1, step=1
             )
-            order_type = st.selectbox("Order Type", ["MARKET", "LIMIT"])
+            order_type = st.selectbox("Order Type", ["LIMIT", "MARKET"])
 
         price = 0.0
         if order_type == "LIMIT":
-            price = st.number_input("Limit Price", min_value=0.0, value=100.0)
+            price = st.number_input("Limit Price", min_value=0.05, value=1.00)
 
         if st.form_submit_button("⚡ Push Trade Order", type="primary"):
             payload = {
+                "exchange": exchange,
                 "symbol": symbol,
                 "transaction_type": transaction_type,
                 "quantity": quantity,
@@ -148,12 +153,16 @@ with tab2:
                 "price": price,
             }
             try:
-                tr = requests.post(
+                res = requests.post(
                     f"{BACKEND_URL}/push_trade", json=payload, timeout=5
-                ).json()
-                st.success(f"Order Placed! Order ID: {tr.get('order_id')}")
+                )
+                if res.status_code == 200:
+                    tr = res.json()
+                    st.success(f"Order Placed! Order ID: {tr.get('order_id')}")
+                else:
+                    st.error(f"Trade Rejected by Backend: {res.text}")
             except Exception as e:
-                st.error(f"Trade Failed: {e}")
+                st.error(f"Trade Execution Failed: {e}")
 
 with tab3:
     st.subheader("System Event Logs")
@@ -162,4 +171,4 @@ with tab3:
             lg = requests.get(f"{BACKEND_URL}/logs", timeout=3).json()
             st.code(lg.get("logs"), language="text")
         except Exception as e:
-            st.error(f"Error loading logs: {e}")
+            st.error(f"Error fetching server logs: {e}")
