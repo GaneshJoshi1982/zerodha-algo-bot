@@ -14,7 +14,7 @@ st.set_page_config(
 )
 st.title("⚡ Zerodha Algorithmic Trading Terminal")
 
-# Pre-check health status to avoid re-triggering callback loops
+# Pre-check health status to prevent redirect loops
 session_authenticated = False
 try:
     health_check = requests.get(f"{BACKEND_URL}/health", timeout=3).json()
@@ -24,7 +24,7 @@ try:
 except Exception:
     pass
 
-# Process OAuth redirect token from Zerodha
+# Handle OAuth redirect token from Zerodha login
 if "request_token" in st.query_params:
     token = st.query_params["request_token"]
 
@@ -50,7 +50,7 @@ if "request_token" in st.query_params:
             st.query_params.clear()
             st.error(f"❌ Connection to Oracle Cloud failed: {e}")
 
-# Render live system metrics
+# Render real-time system metrics
 health_data = {}
 try:
     res = requests.get(f"{BACKEND_URL}/health", timeout=3).json()
@@ -141,7 +141,7 @@ with tab2:
 
         price = 0.0
         if order_type == "LIMIT":
-            price = st.number_input("Limit Price", min_value=0.05, value=1.00)
+            price = st.number_input("Limit Price", min_value=0.05, value=12.70)
 
         if st.form_submit_button("⚡ Push Trade Order", type="primary"):
             payload = {
