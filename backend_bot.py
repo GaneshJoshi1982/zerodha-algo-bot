@@ -54,7 +54,7 @@ def save_token(token_str: str):
         f.write(token_str.strip())
 
 # ==========================================
-# 1. ZERODHA CALLBACK & AUTH ENDPOINTS
+# 1. AUTH & HEALTH ENDPOINTS
 # ==========================================
 @app.api_route("/callback", methods=["GET", "POST"])
 @app.api_route("/callback/", methods=["GET", "POST"])
@@ -80,8 +80,7 @@ async def zerodha_callback(request: Request):
         <html>
             <body style="font-family: Arial; text-align: center; padding-top: 50px;">
                 <h1 style="color: green;">✅ Zerodha Authentication Successful!</h1>
-                <p>Access Token has been generated and linked to your Oracle VPS Trading Bot.</p>
-                <p>You can close this tab and return to your Streamlit Terminal.</p>
+                <p>Access Token linked successfully to your Oracle VPS Trading Engine.</p>
             </body>
         </html>
         """
@@ -116,8 +115,6 @@ def health_check():
 
 @app.api_route("/get-token", methods=["GET", "POST"])
 @app.api_route("/get_token", methods=["GET", "POST"])
-@app.api_route("/get-token/", methods=["GET", "POST"])
-@app.api_route("/get_token/", methods=["GET", "POST"])
 def get_token_endpoint():
     token = get_saved_token()
     if token:
@@ -126,14 +123,12 @@ def get_token_endpoint():
 
 @app.api_route("/set-token", methods=["GET", "POST"])
 @app.api_route("/set_token", methods=["GET", "POST"])
-@app.api_route("/set-token/", methods=["GET", "POST"])
-@app.api_route("/set_token/", methods=["GET", "POST"])
 async def set_token_endpoint(request: Request):
     token = request.query_params.get("access_token") or request.query_params.get("token")
     if not token:
         try:
             body = await request.json()
-            token = body.get("access_token") or body.get("token") or body.get("request_token")
+            token = body.get("access_token") or body.get("token")
         except Exception:
             pass
 
@@ -143,7 +138,54 @@ async def set_token_endpoint(request: Request):
     return {"status": "ERROR", "message": "Missing token parameter"}, 400
 
 # ==========================================
-# 2. STRATEGY ENGINE (LINREG + HM CONFLUENCE)
+# 2. MARGINS & POSITIONS ENDPOINTS
+# ==========================================
+@app.api_route("/margins", methods=["GET", "POST"])
+@app.api_route("/margins/", methods=["GET", "POST"])
+@app.api_route("/sync-margins", methods=["GET", "POST"])
+@app.api_route("/sync_margins", methods=["GET", "POST"])
+@app.api_route("/get-margins", methods=["GET", "POST"])
+@app.api_route("/get_margins", methods=["GET", "POST"])
+def sync_margins():
+    token = get_saved_token()
+    if not token:
+        return {"status": "ERROR", "message": "Unauthenticated"}, 401
+
+    try:
+        kite = KiteConnect(api_key=API_KEY)
+        kite.set_access_token(token)
+        margins = kite.margins()
+        equity_margins = margins.get("equity", {})
+        available_cash = equity_margins.get("available", {}).get("live_balance", 0.0)
+
+        return {
+            "status": "SUCCESS",
+            "available_cash": available_cash,
+            "net": equity_margins.get("net", 0.0),
+            "margins": margins
+        }
+    except Exception as e:
+        return {"status": "ERROR", "message": str(e)}, 500
+
+@app.api_route("/positions", methods=["GET", "POST"])
+@app.api_route("/positions/", methods=["GET", "POST"])
+@app.api_route("/get-positions", methods=["GET", "POST"])
+@app.api_route("/get_positions", methods=["GET", "POST"])
+def get_positions():
+    token = get_saved_token()
+    if not token:
+        return {"status": "ERROR", "message": "Unauthenticated"}, 401
+
+    try:
+        kite = KiteConnect(api_key=API_KEY)
+        kite.set_access_token(token)
+        positions = kite.positions()
+        return {"status": "SUCCESS", "positions": positions.get("net", [])}
+    except Exception as e:
+        return {"status": "ERROR", "message": str(e)}, 500
+
+# ==========================================
+# 3. STRATEGY ENGINE (LINREG + HM CONFLUENCE)
 # ==========================================
 def calculate_rsi(series: pd.Series, period: int = 9) -> pd.Series:
     delta = series.diff()
