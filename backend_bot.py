@@ -119,10 +119,14 @@ def sync_account():
         kite = KiteConnect(
             api_key=API_KEY, access_token=system_state["access_token"]
         )
-        margins = kite.margins(segment="equity")
-        equity_data = margins.get("equity", {})
+        m = kite.margins(segment="equity")
 
-        # Access exact net cash balance field returned by Kite API
+        # Safely extract net balance regardless of dict wrapper format
+        if "equity" in m and isinstance(m["equity"], dict):
+            equity_data = m["equity"]
+        else:
+            equity_data = m
+
         available_margin = equity_data.get(
             "net", equity_data.get("available", {}).get("live_balance", 0)
         )
