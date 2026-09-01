@@ -138,7 +138,7 @@ async def set_token_endpoint(request: Request):
     return {"status": "ERROR", "message": "Missing token parameter"}, 400
 
 # ==========================================
-# 2. MARGINS & POSITIONS ENDPOINTS
+# 2. MARGINS, ACCOUNT & POSITIONS ENDPOINTS
 # ==========================================
 @app.api_route("/margins", methods=["GET", "POST"])
 @app.api_route("/margins/", methods=["GET", "POST"])
@@ -146,6 +146,8 @@ async def set_token_endpoint(request: Request):
 @app.api_route("/sync_margins", methods=["GET", "POST"])
 @app.api_route("/get-margins", methods=["GET", "POST"])
 @app.api_route("/get_margins", methods=["GET", "POST"])
+@app.api_route("/sync-account", methods=["GET", "POST"])
+@app.api_route("/sync_account", methods=["GET", "POST"])
 def sync_margins():
     token = get_saved_token()
     if not token:
@@ -161,6 +163,7 @@ def sync_margins():
         return {
             "status": "SUCCESS",
             "available_cash": available_cash,
+            "cash": available_cash,
             "net": equity_margins.get("net", 0.0),
             "margins": margins
         }
@@ -181,6 +184,38 @@ def get_positions():
         kite.set_access_token(token)
         positions = kite.positions()
         return {"status": "SUCCESS", "positions": positions.get("net", [])}
+    except Exception as e:
+        return {"status": "ERROR", "message": str(e)}, 500
+
+@app.api_route("/square-off", methods=["GET", "POST"])
+@app.api_route("/square_off", methods=["GET", "POST"])
+def emergency_square_off():
+    token = get_saved_token()
+    if not token:
+        return {"status": "ERROR", "message": "Unauthenticated"}, 401
+
+    try:
+        kite = KiteConnect(api_key=API_KEY)
+        kite.set_access_token(token)
+        net_positions = kite.positions().get("net", [])
+        closed_count = 0
+
+        for pos in net_positions:
+            qty = pos.get("quantity", 0)
+            if qty != 0:
+                tx_type = kite.TRANSACTION_TYPE_SELL if qty > 0 else kite.TRANSACTION_TYPE_BUY
+                kite.place_order(
+                    variety=kite.VARIETY_REGULAR,
+                    exchange=pos.get("exchange", "NFO"),
+                    tradingsymbol=pos.get("tradingsymbol"),
+                    transaction_type=tx_type,
+                    quantity=abs(qty),
+                    product=pos.get("product", kite.PRODUCT_MIS),
+                    order_type=kite.ORDER_TYPE_MARKET
+                )
+                closed_count += 1
+
+        return {"status": "SUCCESS", "message": f"Squared off {closed_count} positions successfully."}
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}, 500
 
