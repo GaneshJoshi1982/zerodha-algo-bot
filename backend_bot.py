@@ -6,6 +6,9 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Zerodha Algorithmic Trading Engine")
 
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
 API_KEY = "magym2s4yk13gsze".strip()
 API_SECRET = "uxph73v40oemxff3c9xn48swqwctbfmf".strip()
 TOKEN_FILE = "/home/ubuntu/.kite_token"
@@ -19,6 +22,7 @@ system_state = {
 
 
 def load_token_from_disk():
+    """Restores cached session token from disk on server startup."""
     if os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE, "r") as f:
@@ -30,10 +34,13 @@ def load_token_from_disk():
                     kite.margins(segment="equity")
                     system_state["access_token"] = saved_token
                     system_state["zerodha_session_valid"] = True
-        except Exception:
+                    print("[SYSTEM] Session restored from persistent storage.")
+        except Exception as e:
+            print(f"[SYSTEM] Persistent token invalid or expired: {e}")
             system_state["zerodha_session_valid"] = False
 
 
+# Auto-load token on server boot
 load_token_from_disk()
 
 
@@ -44,6 +51,11 @@ class TradeRequest(BaseModel):
     quantity: int
     order_type: str
     price: float = 0.0
+
+
+# ==============================================================================
+# ROUTER ENDPOINTS
+# ==============================================================================
 
 
 @app.get("/health")
@@ -80,8 +92,10 @@ def zerodha_callback(request_token: str = Query(None)):
             request_token=request_token.strip(), api_secret=API_SECRET
         )
         access_token = data["access_token"]
+
         with open(TOKEN_FILE, "w") as f:
             f.write(access_token)
+
         system_state["access_token"] = access_token
         system_state["zerodha_session_valid"] = True
         return {"status": "SUCCESS", "message": "Authenticated successfully"}
@@ -106,11 +120,15 @@ def sync_account():
             api_key=API_KEY, access_token=system_state["access_token"]
         )
         margins = kite.margins(segment="equity")
-        # Extract net/cash margin from Zerodha dict
         equity_data = margins.get("equity", {})
-        available_margin = equity_data.get("available", {}).get(
-            "live_balance", equity_data.get("net", 0)
-        )
+
+        # Extract cash margin correctly across Zerodha dict structures
+        available_margin = equity_data.get("net", 0)
+        if available_margin == 0:
+            available_margin = (
+                equity_data.get("available", {}).get("live_balance", 0)
+            )
+
         return {"status": "SUCCESS", "margin": available_margin}
     except Exception as e:
         system_state["zerodha_session_valid"] = False
@@ -128,13 +146,16 @@ def push_trade(trade: TradeRequest):
         kite = KiteConnect(
             api_key=API_KEY, access_token=system_state["access_token"]
         )
+
+        selected_exchange = (
+            kite.EXCHANGE_NSE
+            if trade.exchange.upper() == "NSE"
+            else kite.EXCHANGE_NFO
+        )
+
         order_id = kite.place_order(
             variety=kite.VARIETY_REGULAR,
-            exchange=(
-                kite.EXCHANGE_NSE
-                if trade.exchange == "NSE"
-                else kite.EXCHANGE_NFO
-            ),
+            exchange=selected_exchange,
             tradingsymbol=trade.symbol.strip().upper(),
             transaction_type=(
                 kite.TRANSACTION_TYPE_BUY
