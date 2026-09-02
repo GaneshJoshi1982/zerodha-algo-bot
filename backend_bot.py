@@ -299,16 +299,42 @@ def emergency_square_off():
         for pos in net_positions:
             qty = pos.get("quantity", 0)
             if qty != 0:
+                tradingsymbol = pos.get("tradingsymbol")
+                exchange = pos.get("exchange", "NFO")
+                product = pos.get("product", kite.PRODUCT_MIS)
                 tx_type = kite.TRANSACTION_TYPE_SELL if qty > 0 else kite.TRANSACTION_TYPE_BUY
-                kite.place_order(
-                    variety=kite.VARIETY_REGULAR,
-                    exchange=pos.get("exchange", "NFO"),
-                    tradingsymbol=pos.get("tradingsymbol"),
-                    transaction_type=tx_type,
-                    quantity=abs(qty),
-                    product=pos.get("product", kite.PRODUCT_MIS),
-                    order_type=kite.ORDER_TYPE_MARKET
-                )
+                
+                # Fetch LTP to place a marketable limit order (bypasses market protection restrictions)
+                try:
+                    instrument_key = f"{exchange}:{tradingsymbol}"
+                    quote_data = kite.quote(instrument_key)
+                    ltp = quote_data.get(instrument_key, {}).get("last_price", 0.0)
+                except Exception:
+                    ltp = 0.0
+
+                if ltp > 0:
+                    # Apply a 1% buffer for immediate execution
+                    limit_price = round(ltp * 0.99, 2) if tx_type == kite.TRANSACTION_TYPE_SELL else round(ltp * 1.01, 2)
+                    kite.place_order(
+                        variety=kite.VARIETY_REGULAR,
+                        exchange=exchange,
+                        tradingsymbol=tradingsymbol,
+                        transaction_type=tx_type,
+                        quantity=abs(qty),
+                        product=product,
+                        order_type=kite.ORDER_TYPE_LIMIT,
+                        price=limit_price
+                    )
+                else:
+                    kite.place_order(
+                        variety=kite.VARIETY_REGULAR,
+                        exchange=exchange,
+                        tradingsymbol=tradingsymbol,
+                        transaction_type=tx_type,
+                        quantity=abs(qty),
+                        product=product,
+                        order_type=kite.ORDER_TYPE_MARKET
+                    )
                 closed_count += 1
 
         return JSONResponse(content={"status": "SUCCESS", "message": f"Squared off {closed_count} positions successfully."})
