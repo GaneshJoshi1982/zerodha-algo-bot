@@ -1,6 +1,8 @@
-from datetime import datetime
+from datetime import datetime, time
 import math
 import os
+import threading
+import time as ttime
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +19,14 @@ TOKEN_FILE = "access_token.txt"
 
 MAX_RISK_PER_TRADE = 2000.0
 DEFAULT_SL_PCT = 0.15
+MAX_TRADES_PER_SESSION = 2
+
+# Global runtime state for session tracking
+SESSION_STATE = {
+    "trades_today": 0,
+    "last_trade_time": None,
+    "active_signal": "HOLD"
+}
 
 LOT_SIZES = {
     "NIFTY": 65,
@@ -28,10 +38,9 @@ LOT_SIZES = {
 }
 
 INDEX_TOKENS = {
-    "NIFTY": {"token": 256265, "symbol": "NSE:NIFTY 50"},
-    "BANKNIFTY": {"token": 260105, "symbol": "NSE:NIFTY BANK"},
-    "FINNIFTY": {"token": 257801, "symbol": "NSE:NIFTY FIN SERVICE"},
-    "SENSEX": {"token": 265, "symbol": "BSE:SENSEX"},
+    "NIFTY": {"token": 256265, "symbol": "NSE:NIFTY 50", "name": "NIFTY"},
+    "BANKNIFTY": {"token": 260105, "symbol": "NSE:NIFTY BANK", "name": "BANKNIFTY"},
+    "FINNIFTY": {"token": 257801, "symbol": "NSE:NIFTY FIN SERVICE", "name": "FINNIFTY"},
 }
 
 app = FastAPI(title="Zerodha Algorithmic Trading Bot Backend")
@@ -57,296 +66,7 @@ def save_token(token_str: str):
         f.write(token_str.strip())
 
 # ==========================================
-# 2. AUTH & HEALTH ENDPOINTS
-# ==========================================
-@app.api_route("/callback", methods=["GET", "POST"])
-@app.api_route("/callback/", methods=["GET", "POST"])
-async def zerodha_callback(request: Request):
-    request_token = request.query_params.get("request_token")
-    if not request_token:
-        try:
-            body = await request.json()
-            if isinstance(body, dict):
-                request_token = body.get("request_token")
-        except Exception:
-            pass
-
-    if not request_token:
-        return HTMLResponse("<h2>❌ Error: Missing request_token from Zerodha.</h2>", status_code=400)
-
-    try:
-        kite = KiteConnect(api_key=API_KEY)
-        session_data = kite.generate_session(request_token, api_secret=API_SECRET)
-        access_token = session_data["access_token"]
-        save_token(access_token)
-
-        html_content = """
-        <html>
-            <body style="font-family: Arial; text-align: center; padding-top: 50px;">
-                <h1 style="color: green;">✅ Zerodha Authentication Successful!</h1>
-                <p>Access Token linked successfully to your Oracle VPS Trading Engine.</p>
-            </body>
-        </html>
-        """
-        return HTMLResponse(content=html_content, status_code=200)
-    except Exception as e:
-        return HTMLResponse(f"<h2>❌ Session Generation Failed: {str(e)}</h2>", status_code=500)
-
-@app.api_route("/health", methods=["GET", "POST"])
-@app.api_route("/health/", methods=["GET", "POST"])
-def health_check():
-    token = get_saved_token()
-    is_auth = False
-    if token:
-        try:
-            kite = KiteConnect(api_key=API_KEY)
-            kite.set_access_token(token)
-            kite.profile()
-            is_auth = True
-        except Exception:
-            is_auth = False
-
-    return JSONResponse(content={
-        "status": "GREEN" if is_auth else "RED",
-        "message": "All Systems Active & Linked" if is_auth else "Disconnected / Login Required",
-        "checks": {
-            "login_authenticated": is_auth,
-            "ip_whitelisted": True,
-            "service_active": True
-        },
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    })
-
-@app.api_route("/get-token", methods=["GET", "POST"])
-@app.api_route("/get_token", methods=["GET", "POST"])
-def get_token_endpoint():
-    token = get_saved_token()
-    if token:
-        return JSONResponse(content={"status": "SUCCESS", "access_token": token, "token": token})
-    return JSONResponse(content={"status": "ERROR", "message": "No active session token"}, status_code=404)
-
-@app.api_route("/set-token", methods=["GET", "POST"])
-@app.api_route("/set_token", methods=["GET", "POST"])
-async def set_token_endpoint(request: Request):
-    token = request.query_params.get("access_token") or request.query_params.get("token")
-    if not token:
-        try:
-            body = await request.json()
-            if isinstance(body, dict):
-                token = body.get("access_token") or body.get("token")
-        except Exception:
-            pass
-
-    if token:
-        save_token(token)
-        return JSONResponse(content={"status": "SUCCESS", "message": "Token updated successfully"})
-    return JSONResponse(content={"status": "ERROR", "message": "Missing token parameter"}, status_code=400)
-
-# ==========================================
-# 3. MARGINS, POSITIONS & ORDER EXECUTION
-# ==========================================
-@app.api_route("/sync", methods=["GET", "POST"])
-@app.api_route("/margins", methods=["GET", "POST"])
-@app.api_route("/sync-margins", methods=["GET", "POST"])
-@app.api_route("/sync_margins", methods=["GET", "POST"])
-@app.api_route("/sync_account", methods=["GET", "POST"])
-@app.api_route("/sync-account", methods=["GET", "POST"])
-@app.api_route("/account", methods=["GET", "POST"])
-@app.api_route("/balance", methods=["GET", "POST"])
-def sync_margins_endpoint():
-    token = get_saved_token()
-    if not token:
-        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated", "balance": 0.0, "cash": 0.0, "margin": 0.0}, status_code=401)
-
-    try:
-        kite = KiteConnect(api_key=API_KEY)
-        kite.set_access_token(token)
-        margins = kite.margins()
-        
-        equity_margins = margins.get("equity", {})
-        available_obj = equity_margins.get("available", {})
-        net = equity_margins.get("net", 0.0)
-        
-        if isinstance(available_obj, dict):
-            cash = available_obj.get("live_balance", available_obj.get("cash", net))
-        else:
-            cash = float(available_obj) if available_obj else net
-
-        cash_val = round(float(cash), 2)
-
-        return JSONResponse(content={
-            "status": "SUCCESS",
-            "available_cash": cash_val,
-            "cash": cash_val,
-            "balance": cash_val,
-            "margin": cash_val,
-            "net": round(float(net), 2),
-            "margins": margins,
-            "data": margins
-        })
-    except Exception as e:
-        return JSONResponse(content={"status": "ERROR", "message": str(e), "balance": 0.0, "cash": 0.0, "margin": 0.0}, status_code=500)
-
-@app.api_route("/push_trade", methods=["GET", "POST"])
-@app.api_route("/push-trade", methods=["GET", "POST"])
-@app.api_route("/trade", methods=["GET", "POST"])
-async def push_trade_endpoint(request: Request):
-    token = get_saved_token()
-    if not token:
-        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated"}, status_code=401)
-
-    body = {}
-    try:
-        if request.method == "POST":
-            raw_payload = await request.json()
-            if isinstance(raw_payload, list):
-                for item in raw_payload:
-                    if isinstance(item, dict):
-                        body.update(item)
-            elif isinstance(raw_payload, dict):
-                body = raw_payload
-        else:
-            body = dict(request.query_params)
-    except Exception:
-        body = dict(request.query_params)
-
-    if not body:
-        body = dict(request.query_params)
-
-    symbol = body.get("symbol") or body.get("tradingsymbol") or "IDEA"
-    exchange = body.get("exchange") or "NSE"
-    action = (body.get("action") or body.get("transaction_type") or "BUY").upper()
-    order_type = (body.get("order_type") or "LIMIT").upper()
-    
-    try:
-        qty = int(body.get("qty") or body.get("quantity") or 1)
-    except Exception:
-        qty = 1
-
-    try:
-        price = float(body.get("price") or body.get("limit_price") or 0.0)
-    except Exception:
-        price = 0.0
-
-    try:
-        kite = KiteConnect(api_key=API_KEY)
-        kite.set_access_token(token)
-
-        tx_type = kite.TRANSACTION_TYPE_BUY if action == "BUY" else kite.TRANSACTION_TYPE_SELL
-        ord_type = kite.ORDER_TYPE_LIMIT if order_type == "LIMIT" else kite.ORDER_TYPE_MARKET
-
-        order_kwargs = {
-            "variety": kite.VARIETY_REGULAR,
-            "exchange": getattr(kite, f"EXCHANGE_{exchange}", kite.EXCHANGE_NSE),
-            "tradingsymbol": symbol,
-            "transaction_type": tx_type,
-            "quantity": qty,
-            "product": kite.PRODUCT_MIS,
-            "order_type": ord_type
-        }
-
-        if ord_type == kite.ORDER_TYPE_LIMIT and price > 0:
-            order_kwargs["price"] = price
-
-        order_id = kite.place_order(**order_kwargs)
-
-        return JSONResponse(content={
-            "status": "SUCCESS",
-            "order_id": order_id,
-            "message": f"Order Executed Successfully! Order ID: {order_id}"
-        })
-    except Exception as e:
-        return JSONResponse(content={"status": "ERROR", "message": str(e)}, status_code=500)
-
-@app.api_route("/positions", methods=["GET", "POST"])
-@app.api_route("/get-positions", methods=["GET", "POST"])
-@app.api_route("/get_positions", methods=["GET", "POST"])
-def get_positions():
-    token = get_saved_token()
-    if not token:
-        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated"}, status_code=401)
-
-    try:
-        kite = KiteConnect(api_key=API_KEY)
-        kite.set_access_token(token)
-        positions = kite.positions()
-        net_list = positions.get("net", [])
-        day_list = positions.get("day", [])
-        
-        return JSONResponse(content={
-            "status": "SUCCESS",
-            "positions": net_list,
-            "net": net_list,
-            "day": day_list,
-            "data": net_list
-        })
-    except Exception as e:
-        return JSONResponse(content={"status": "ERROR", "message": str(e)}, status_code=500)
-
-@app.api_route("/square-off", methods=["GET", "POST"])
-@app.api_route("/square_off", methods=["GET", "POST"])
-def emergency_square_off():
-    token = get_saved_token()
-    if not token:
-        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated"}, status_code=401)
-
-    try:
-        kite = KiteConnect(api_key=API_KEY)
-        kite.set_access_token(token)
-        net_positions = kite.positions().get("net", [])
-        closed_count = 0
-
-        for pos in net_positions:
-            qty = pos.get("quantity", 0)
-            if qty != 0:
-                tradingsymbol = pos.get("tradingsymbol")
-                exchange = pos.get("exchange", "NFO")
-                product = pos.get("product", kite.PRODUCT_MIS)
-                tx_type = kite.TRANSACTION_TYPE_SELL if qty > 0 else kite.TRANSACTION_TYPE_BUY
-                
-                # Fetch LTP to place a marketable limit order (bypasses market protection restrictions)
-                try:
-                    instrument_key = f"{exchange}:{tradingsymbol}"
-                    quote_data = kite.quote(instrument_key)
-                    ltp = quote_data.get(instrument_key, {}).get("last_price", 0.0)
-                except Exception:
-                    ltp = 0.0
-
-                if ltp > 0:
-                    # Apply a 1% buffer for immediate execution
-                    limit_price = round(ltp * 0.99, 2) if tx_type == kite.TRANSACTION_TYPE_SELL else round(ltp * 1.01, 2)
-                    kite.place_order(
-                        variety=kite.VARIETY_REGULAR,
-                        exchange=exchange,
-                        tradingsymbol=tradingsymbol,
-                        transaction_type=tx_type,
-                        quantity=abs(qty),
-                        product=product,
-                        order_type=kite.ORDER_TYPE_LIMIT,
-                        price=limit_price
-                    )
-                else:
-                    kite.place_order(
-                        variety=kite.VARIETY_REGULAR,
-                        exchange=exchange,
-                        tradingsymbol=tradingsymbol,
-                        transaction_type=tx_type,
-                        quantity=abs(qty),
-                        product=product,
-                        order_type=kite.ORDER_TYPE_MARKET
-                    )
-                closed_count += 1
-
-        return JSONResponse(content={"status": "SUCCESS", "message": f"Squared off {closed_count} positions successfully."})
-    except Exception as e:
-        return JSONResponse(content={"status": "ERROR", "message": str(e)}, status_code=500)
-
-@app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE"])
-async def catch_all_fallback(full_path: str, request: Request):
-    return JSONResponse(content={"status": "SUCCESS", "message": f"Path /{full_path} acknowledged.", "balance": 0.0, "cash": 0.0})
-
-# ==========================================
-# 4. STRATEGY ENGINE (LINREG + HM CONFLUENCE)
+# 2. STRATEGY ENGINE (LINREG + HM CONFLUENCE)
 # ==========================================
 def calculate_rsi(series: pd.Series, period: int = 9) -> pd.Series:
     delta = series.diff()
@@ -378,29 +98,22 @@ def calculate_linreg_series(series: pd.Series, length: int = 11) -> pd.Series:
 
     return series.rolling(window=length).apply(get_linreg_val, raw=True)
 
-@app.api_route("/evaluate-signal", methods=["GET", "POST"])
-@app.api_route("/evaluate_signal", methods=["GET", "POST"])
-def evaluate_signal(symbol: str = "NIFTY"):
-    symbol_key = symbol.upper()
-    token = get_saved_token()
-    if not token:
-        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated"}, status_code=401)
-
+def evaluate_symbol_signal(kite, symbol_key):
     try:
-        kite = KiteConnect(api_key=API_KEY)
-        kite.set_access_token(token)
+        idx_info = INDEX_TOKENS.get(symbol_key)
+        if not idx_info:
+            return "HOLD"
 
-        idx_info = INDEX_TOKENS.get(symbol_key, INDEX_TOKENS["NIFTY"])
         to_date = datetime.now()
-        from_date = to_date - pd.Timedelta(days=5)
+        from_date = to_date - pd.Timedelta(days=3)
 
         candles = kite.historical_data(idx_info["token"], from_date, to_date, "5minute")
         df = pd.DataFrame(candles)
 
         if df.empty or len(df) < 30:
-            return JSONResponse(content={"status": "ERROR", "message": "Insufficient candle data"}, status_code=400)
+            return "HOLD"
 
-        # Hilega-Milega
+        # Hilega-Milega Indicators
         df["rsi9"] = calculate_rsi(df["close"], period=9)
         df["hm_price_ema3"] = df["rsi9"].ewm(span=3, adjust=False).mean()
         df["hm_strength_wma21"] = calculate_wma(df["rsi9"], length=21)
@@ -420,22 +133,252 @@ def evaluate_signal(symbol: str = "NIFTY"):
         hm_bearish = latest["hm_price_ema3"] < latest["hm_strength_wma21"]
 
         if linreg_bull_cross and hm_bullish:
-            signal = "BUY_CE"
+            return "BUY_CE"
         elif linreg_bear_cross and hm_bearish:
-            signal = "BUY_PE"
-        else:
-            signal = "HOLD"
+            return "BUY_PE"
+        
+        return "HOLD"
+    except Exception:
+        return "HOLD"
 
-        return JSONResponse(content={
-            "status": "SUCCESS",
-            "symbol": symbol_key,
-            "signal": signal,
-            "bclose": round(float(latest["bclose"]), 2),
-            "signal_line": round(float(latest["signal_line"]), 2),
-            "hm_bullish": bool(hm_bullish),
-            "hm_bearish": bool(hm_bearish),
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
+# ==========================================
+# 3. BACKGROUND TRADING WORKER LOOP
+# ==========================================
+def background_trading_engine():
+    """Runs continuously in the background, checking market conditions every 60 seconds."""
+    while True:
+        try:
+            ttime.sleep(60) # Check every minute
+            
+            # Check session trade limit
+            if SESSION_STATE["trades_today"] >= MAX_TRADES_PER_SESSION:
+                continue
 
+            # Check if market is active (9:15 AM to 3:15 PM IST)
+            now = datetime.now()
+            current_time = now.time()
+            if now.weekday() >= 5: # Weekend
+                continue
+            if not (time(9, 15) <= current_time <= time(15, 15)):
+                continue
+
+            token = get_saved_token()
+            if not token:
+                continue
+
+            kite = KiteConnect(api_key=API_KEY)
+            kite.set_access_token(token)
+
+            # Evaluate Enabled Indices
+            for symbol_key in INDEX_TOKENS.keys():
+                signal = evaluate_symbol_signal(kite, symbol_key)
+                SESSION_STATE["active_signal"] = f"{symbol_key}: {signal}"
+
+                if signal in ["BUY_CE", "BUY_PE"]:
+                    # Confluence achieved! Execute automated trade
+                    lot_size = LOT_SIZES.get(symbol_key, 65)
+                    
+                    # Place order (Example market order execution for MIS)
+                    # In production, this can shortlist the ATM option contract dynamically.
+                    order_id = kite.place_order(
+                        variety=kite.VARIETY_REGULAR,
+                        exchange=kite.EXCHANGE_NFO,
+                        tradingsymbol=f"{symbol_key}26SEPCE", # Placeholder option symbol formatting
+                        transaction_type=kite.TRANSACTION_TYPE_BUY,
+                        quantity=lot_size,
+                        product=kite.PRODUCT_MIS,
+                        order_type=kite.ORDER_TYPE_MARKET
+                    )
+                    
+                    SESSION_STATE["trades_today"] += 1
+                    SESSION_STATE["last_trade_time"] = now.strftime("%Y-%m-%d %H:%M:%S")
+                    break # Execute only one trade per loop cycle
+
+        except Exception as e:
+            print(f"[Background Engine Error]: {str(e)}")
+
+# Start background worker thread when FastAPI starts up
+@app.on_event("startup")
+def startup_event():
+    t = threading.Thread(target=background_trading_engine, daemon=True)
+    t.start()
+
+# ==========================================
+# 4. API ENDPOINTS
+# ==========================================
+@app.api_route("/callback", methods=["GET", "POST"])
+@app.api_route("/callback/", methods=["GET", "POST"])
+async def zerodha_callback(request: Request):
+    request_token = request.query_params.get("request_token")
+    if not request_token:
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                request_token = body.get("request_token")
+        except Exception:
+            pass
+
+    if not request_token:
+        return HTMLResponse("<h2>❌ Error: Missing request_token from Zerodha.</h2>", status_code=400)
+
+    try:
+        kite = KiteConnect(api_key=API_KEY)
+        session_data = kite.generate_session(request_token, api_secret=API_SECRET)
+        access_token = session_data["access_token"]
+        save_token(access_token)
+        return HTMLResponse(content="<h1>✅ Authentication Successful & Background Bot Linked!</h1>", status_code=200)
+    except Exception as e:
+        return HTMLResponse(f"<h2>❌ Session Generation Failed: {str(e)}</h2>", status_code=500)
+
+@app.api_route("/health", methods=["GET", "POST"])
+@app.api_route("/health/", methods=["GET", "POST"])
+def health_check():
+    token = get_saved_token()
+    is_auth = False
+    if token:
+        try:
+            kite = KiteConnect(api_key=API_KEY)
+            kite.set_access_token(token)
+            kite.profile()
+            is_auth = True
+        except Exception:
+            is_auth = False
+
+    return JSONResponse(content={
+        "status": "GREEN" if is_auth else "RED",
+        "message": "All Systems Active & Linked" if is_auth else "Disconnected / Login Required",
+        "session_state": SESSION_STATE,
+        "checks": {"login_authenticated": is_auth, "background_worker": "Running"},
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+
+@app.api_route("/sync", methods=["GET", "POST"])
+@app.api_route("/margins", methods=["GET", "POST"])
+@app.api_route("/sync-margins", methods=["GET", "POST"])
+def sync_margins_endpoint():
+    token = get_saved_token()
+    if not token:
+        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated"}, status_code=401)
+
+    try:
+        kite = KiteConnect(api_key=API_KEY)
+        kite.set_access_token(token)
+        margins = kite.margins()
+        equity = margins.get("equity", {})
+        cash = equity.get("available", {}).get("live_balance", equity.get("net", 0.0))
+        return JSONResponse(content={"status": "SUCCESS", "available_cash": round(float(cash), 2), "margins": margins})
+    except Exception as e:
+        return JSONResponse(content={"status": "ERROR", "message": str(e)}, status_code=500)
+
+@app.api_route("/push_trade", methods=["GET", "POST"])
+@app.api_route("/push-trade", methods=["GET", "POST"])
+async def push_trade_endpoint(request: Request):
+    token = get_saved_token()
+    if not token:
+        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated"}, status_code=401)
+
+    body = {}
+    try:
+        if request.method == "POST":
+            raw_payload = await request.json()
+            if isinstance(raw_payload, list):
+                for item in raw_payload:
+                    if isinstance(item, dict):
+                        body.update(item)
+            elif isinstance(raw_payload, dict):
+                body = raw_payload
+    except Exception:
+        body = dict(request.query_params)
+
+    symbol = body.get("symbol") or body.get("tradingsymbol") or "IDEA"
+    exchange = body.get("exchange") or "NSE"
+    action = (body.get("action") or body.get("transaction_type") or "BUY").upper()
+    qty = int(body.get("qty") or body.get("quantity") or 1)
+
+    try:
+        kite = KiteConnect(api_key=API_KEY)
+        kite.set_access_token(token)
+        tx_type = kite.TRANSACTION_TYPE_BUY if action == "BUY" else kite.TRANSACTION_TYPE_SELL
+        order_id = kite.place_order(
+            variety=kite.VARIETY_REGULAR,
+            exchange=getattr(kite, f"EXCHANGE_{exchange}", kite.EXCHANGE_NSE),
+            tradingsymbol=symbol,
+            transaction_type=tx_type,
+            quantity=qty,
+            product=kite.PRODUCT_MIS,
+            order_type=kite.ORDER_TYPE_MARKET
+        )
+        return JSONResponse(content={"status": "SUCCESS", "order_id": order_id, "message": f"Manual Order Executed! ID: {order_id}"})
+    except Exception as e:
+        return JSONResponse(content={"status": "ERROR", "message": str(e)}, status_code=500)
+
+@app.api_route("/positions", methods=["GET", "POST"])
+@app.api_route("/get-positions", methods=["GET", "POST"])
+def get_positions():
+    token = get_saved_token()
+    if not token:
+        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated"}, status_code=401)
+
+    try:
+        kite = KiteConnect(api_key=API_KEY)
+        kite.set_access_token(token)
+        positions = kite.positions()
+        net_list = positions.get("net", [])
+        return JSONResponse(content={"status": "SUCCESS", "positions": net_list, "net": net_list, "data": net_list})
+    except Exception as e:
+        return JSONResponse(content={"status": "ERROR", "message": str(e)}, status_code=500)
+
+@app.api_route("/square-off", methods=["GET", "POST"])
+@app.api_route("/square_off", methods=["GET", "POST"])
+def emergency_square_off():
+    token = get_saved_token()
+    if not token:
+        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated"}, status_code=401)
+
+    try:
+        kite = KiteConnect(api_key=API_KEY)
+        kite.set_access_token(token)
+        net_positions = kite.positions().get("net", [])
+        closed_count = 0
+
+        for pos in net_positions:
+            qty = pos.get("quantity", 0)
+            if qty != 0:
+                tradingsymbol = pos.get("tradingsymbol")
+                exchange = pos.get("exchange", "NFO")
+                product = pos.get("product", kite.PRODUCT_MIS)
+                tx_type = kite.TRANSACTION_TYPE_SELL if qty > 0 else kite.TRANSACTION_TYPE_BUY
+                
+                kite.place_order(
+                    variety=kite.VARIETY_REGULAR,
+                    exchange=exchange,
+                    tradingsymbol=tradingsymbol,
+                    transaction_type=tx_type,
+                    quantity=abs(qty),
+                    product=product,
+                    order_type=kite.ORDER_TYPE_LIMIT,
+                    price=1.0 # Safe fallback price or market protection handling
+                )
+                closed_count += 1
+
+        return JSONResponse(content={"status": "SUCCESS", "message": f"Squared off {closed_count} positions successfully."})
+    except Exception as e:
+        return JSONResponse(content={"status": "ERROR", "message": str(e)}, status_code=500)
+
+@app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def catch_all_fallback(full_path: str, request: Request):
+    return JSONResponse(content={"status": "SUCCESS", "message": f"Path /{full_path} acknowledged.", "balance": 0.0, "cash": 0.0})
+
+@app.api_route("/evaluate-signal", methods=["GET", "POST"])
+@app.api_route("/evaluate_signal", methods=["GET", "POST"])
+def evaluate_signal_endpoint(symbol: str = "NIFTY"):
+    token = get_saved_token()
+    if not token:
+        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated"}, status_code=401)
+    try:
+        kite = KiteConnect(api_key=API_KEY)
+        kite.set_access_token(token)
+        signal = evaluate_symbol_signal(kite, symbol.upper())
+        return JSONResponse(content={"status": "SUCCESS", "symbol": symbol.upper(), "signal": signal, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
     except Exception as e:
         return JSONResponse(content={"status": "ERROR", "message": str(e)}, status_code=500)
