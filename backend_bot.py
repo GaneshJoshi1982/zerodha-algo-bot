@@ -260,6 +260,7 @@ async def push_trade_endpoint(request: Request):
 
 @app.api_route("/positions", methods=["GET", "POST"])
 @app.api_route("/get-positions", methods=["GET", "POST"])
+@app.api_route("/get_positions", methods=["GET", "POST"])
 def get_positions():
     token = get_saved_token()
     if not token:
@@ -269,7 +270,16 @@ def get_positions():
         kite = KiteConnect(api_key=API_KEY)
         kite.set_access_token(token)
         positions = kite.positions()
-        return JSONResponse(content={"status": "SUCCESS", "positions": positions.get("net", [])})
+        net_list = positions.get("net", [])
+        day_list = positions.get("day", [])
+        
+        return JSONResponse(content={
+            "status": "SUCCESS",
+            "positions": net_list,
+            "net": net_list,
+            "day": day_list,
+            "data": net_list
+        })
     except Exception as e:
         return JSONResponse(content={"status": "ERROR", "message": str(e)}, status_code=500)
 
