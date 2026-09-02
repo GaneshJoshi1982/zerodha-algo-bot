@@ -225,6 +225,9 @@ def health_check():
         "status": "GREEN" if is_auth else "RED",
         "cloud_engine": "RUNNING",
         "engine": "RUNNING",
+        "engine_status": "RUNNING",
+        "cloud_status": "RUNNING",
+        "bot_status": "RUNNING",
         "running": True,
         "active": True,
         "message": "All Systems Active & Linked" if is_auth else "Disconnected / Login Required",
@@ -366,6 +369,8 @@ def fallback(path: str):
         "status": "RUNNING",
         "cloud_engine": "RUNNING",
         "engine": "RUNNING",
+        "engine_status": "RUNNING",
+        "cloud_status": "RUNNING",
         "running": True,
         "active": True
     })
