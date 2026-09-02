@@ -1,4 +1,3 @@
-cat << 'EOF' > backend_bot.py
 from datetime import datetime, time
 import os
 import threading
