@@ -369,4 +369,3 @@ def fallback(path: str):
         "running": True,
         "active": True
     })
-EOF
