@@ -247,11 +247,16 @@ def health_check():
 @app.api_route("/status", methods=["GET", "POST"])
 @app.api_route("/engine-status", methods=["GET", "POST"])
 @app.api_route("/engine_status", methods=["GET", "POST"])
-def engine_status():
+@app.api_route("/bot-status", methods=["GET", "POST"])
+@app.api_route("/bot_status", methods=["GET", "POST"])
+@app.api_route("/api/status", methods=["GET", "POST"])
+def unified_engine_status():
     return JSONResponse(content={
         "status": "RUNNING",
         "cloud_engine": "RUNNING",
         "engine": "RUNNING",
+        "running": True,
+        "active": True,
         "state": "ACTIVE"
     })
 
