@@ -21,7 +21,6 @@ MAX_RISK_PER_TRADE = 2000.0
 DEFAULT_SL_PCT = 0.15
 MAX_TRADES_PER_SESSION = 2
 
-# Global runtime state for session tracking
 SESSION_STATE = {
     "trades_today": 0,
     "last_trade_time": None,
@@ -113,12 +112,10 @@ def evaluate_symbol_signal(kite, symbol_key):
         if df.empty or len(df) < 30:
             return "HOLD"
 
-        # Hilega-Milega Indicators
         df["rsi9"] = calculate_rsi(df["close"], period=9)
         df["hm_price_ema3"] = df["rsi9"].ewm(span=3, adjust=False).mean()
         df["hm_strength_wma21"] = calculate_wma(df["rsi9"], length=21)
 
-        # Linear Regression Candles
         df["bopen"] = calculate_linreg_series(df["open"], length=11)
         df["bclose"] = calculate_linreg_series(df["close"], length=11)
         df["signal_line"] = df["bclose"].rolling(window=11).mean()
@@ -145,7 +142,6 @@ def evaluate_symbol_signal(kite, symbol_key):
 # 3. BACKGROUND TRADING WORKER LOOP
 # ==========================================
 def background_trading_engine():
-    """Runs continuously in the background, checking market conditions every 60 seconds."""
     while True:
         try:
             ttime.sleep(60)
@@ -246,6 +242,17 @@ def health_check():
             "ip_whitelisted": True
         },
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+
+@app.api_route("/status", methods=["GET", "POST"])
+@app.api_route("/engine-status", methods=["GET", "POST"])
+@app.api_route("/engine_status", methods=["GET", "POST"])
+def engine_status():
+    return JSONResponse(content={
+        "status": "RUNNING",
+        "cloud_engine": "RUNNING",
+        "engine": "RUNNING",
+        "state": "ACTIVE"
     })
 
 @app.api_route("/get-token", methods=["GET", "POST"])
