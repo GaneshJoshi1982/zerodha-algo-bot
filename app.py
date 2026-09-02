@@ -21,7 +21,7 @@ API_SECRET = "uxph73v40oemxff3c9xn48swqwctbfmf"
 TOKEN_FILE = "access_token.txt"
 PORT = 5000
 # Updated to your active Oracle VPS Production Server
-RENDER_BACKEND = "http://92.4.85.1:10000"
+RENDER_BACKEND = "https://zerodha-algo-bot-vb36.onrender.com"
 
 # Regulatory Standard Derivative Lot Sizes (Updated)
 LOT_SIZES = {
