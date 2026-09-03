@@ -378,6 +378,7 @@ def emergency_square_off():
         return JSONResponse(content={"status": "ERROR", "message": str(e)}, status_code=500)
 
 @app.api_route("/logs", methods=["GET", "POST"])
+@app.api_route("/details", methods=["GET", "POST"])
 def get_logs():
     return JSONResponse(content={"status": "SUCCESS", "logs": "Background worker engine running normally. All checks green."})
 
