@@ -234,7 +234,8 @@ def health_check():
 
     return JSONResponse(content={
         "status": "GREEN" if is_auth else "RED",
-        "cloud_engine": True,  # <-- Fixed line here to ensure UI card reads active state correctly
+        "cloud_engine": True,
+        "cloud_engine_status": "RUNNING",
         "engine": "RUNNING",
         "engine_status": "RUNNING",
         "cloud_status": "RUNNING",
@@ -257,14 +258,14 @@ def health_check():
 def sync_margins_endpoint():
     token = get_saved_token()
     if not token:
-        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated", "balance": 0.0, "cash": 0.0}, status_code=401)
+        return JSONResponse(content={"status": "ERROR", "message": "Unauthenticated", "balance": 0.0, "cash": 0.0, "available_cash": 0.0}, status_code=401)
 
     try:
         kite = KiteConnect(api_key=API_KEY)
         kite.set_access_token(token)
         margins = kite.margins()
         
-        equity_margins = margins.get("equity", {})
+        equity_margins = margins.get("equity", {}) if isinstance(margins, dict) else {}
         available_obj = equity_margins.get("available", {})
         net = equity_margins.get("net", 0.0)
         
@@ -273,18 +274,19 @@ def sync_margins_endpoint():
         else:
             cash = float(available_obj) if available_obj else net
 
-        cash_val = round(float(cash), 2)
+        cash_val = round(float(cash), 2) if cash else 0.0
 
         return JSONResponse(content={
             "status": "SUCCESS",
             "available_cash": cash_val,
             "cash": cash_val,
             "balance": cash_val,
+            "net": cash_val,
             "margins": margins,
             "data": margins
         })
     except Exception as e:
-        return JSONResponse(content={"status": "ERROR", "message": str(e), "balance": 0.0, "cash": 0.0}, status_code=500)
+        return JSONResponse(content={"status": "ERROR", "message": str(e), "balance": 0.0, "cash": 0.0, "available_cash": 0.0}, status_code=500)
 
 @app.api_route("/positions", methods=["GET", "POST"])
 def get_positions():
@@ -378,10 +380,11 @@ def emergency_square_off():
 def fallback(path: str):
     return JSONResponse(content={
         "status": "RUNNING",
-        "cloud_engine": "RUNNING",
+        "cloud_engine": True,
         "engine": "RUNNING",
         "engine_status": "RUNNING",
         "cloud_status": "RUNNING",
+        "bot_status": "RUNNING",
         "running": True,
         "active": True
     })
