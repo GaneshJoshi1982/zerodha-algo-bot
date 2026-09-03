@@ -165,10 +165,21 @@ def background_trading_engine():
 
                 if signal in ["BUY_CE", "BUY_PE"]:
                     lot_size = LOT_SIZES.get(symbol_key, 65)
+                    
+                    try:
+                        quote_data = kite.ltp([INDEX_TOKENS[symbol_key]["symbol"]])
+                        ltp = quote_data[INDEX_TOKENS[symbol_key]["symbol"]]['last_price']
+                        strike_step = 50 if symbol_key in ["NIFTY", "FINNIFTY"] else 100
+                        atm_strike = int(round(ltp / strike_step) * strike_step)
+                        option_type = "CE" if signal == "BUY_CE" else "PE"
+                        opt_symbol = f"{symbol_key}26903{atm_strike}{option_type}"
+                    except Exception:
+                        opt_symbol = f"{symbol_key}26SEP{atm_strike}{option_type}"
+
                     kite.place_order(
                         variety=kite.VARIETY_REGULAR,
                         exchange=kite.EXCHANGE_NFO,
-                        tradingsymbol=f"{symbol_key}26SEPCE",
+                        tradingsymbol=opt_symbol,
                         transaction_type=kite.TRANSACTION_TYPE_BUY,
                         quantity=lot_size,
                         product=kite.PRODUCT_MIS,
@@ -223,7 +234,7 @@ def health_check():
 
     return JSONResponse(content={
         "status": "GREEN" if is_auth else "RED",
-        "cloud_engine": "RUNNING",
+        "cloud_engine": True,  # <-- Fixed line here to ensure UI card reads active state correctly
         "engine": "RUNNING",
         "engine_status": "RUNNING",
         "cloud_status": "RUNNING",
