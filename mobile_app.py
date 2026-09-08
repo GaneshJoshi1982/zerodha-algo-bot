@@ -1,7 +1,7 @@
 import requests
 import streamlit as st
 
-BACKEND_URL = "http://92.4.85.1:10000"
+BACKEND_URL = "http://92.4.85.1:8000"
 KITE_API_KEY = "magym2s4yk13gsze"
 KITE_LOGIN_URL = (
     f"https://kite.zerodha.com/connect/login?v=3&api_key={KITE_API_KEY}"
