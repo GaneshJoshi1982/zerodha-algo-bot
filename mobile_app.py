@@ -1,228 +1,174 @@
-from datetime import datetime, time
-import os
-import threading
-import time as ttime
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from kiteconnect import KiteConnect
-import numpy as np
-import pandas as pd
-import csv
+import requests
+import streamlit as st
 
-app = FastAPI(title="Zerodha Algorithmic Trading Terminal")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+BACKEND_URL = "http://92.4.85.1:10000"
+KITE_API_KEY = "magym2s4yk13gsze"
+KITE_LOGIN_URL = (
+    f"https://kite.zerodha.com/connect/login?v=3&api_key={KITE_API_KEY}"
 )
 
-# ==========================================
-# 1. CONFIGURATION & CONSTANTS
-# ==========================================
-API_KEY = "magym2s4yk13gsze"
-API_SECRET = "uxph73v40oemxf3c9xn48swqwbfmf"
-TOKEN_FILE = "access_token.txt"
-TRADE_LOG_FILE = "trade_history.csv"
+st.set_page_config(
+    page_title="Zerodha Trading Bot",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+st.title("⚡ Zerodha Algorithmic Trading Terminal")
 
-MAX_TRADES_PER_SESSION = 2
-SESSION_STATE = {
-    "trades_today": {"NIFTY": 0, "BANKNIFTY": 0, "FINNIFTY": 0},
-    "last_trade_time": None,
-    "active_signal": "HOLD"
-}
+# Pre-check health status to avoid re-triggering callback loops
+session_authenticated = False
+try:
+    health_check = requests.get(f"{BACKEND_URL}/health", timeout=3).json()
+    session_authenticated = health_check.get("checks", {}).get(
+        "login_authenticated", False
+    )
+except Exception:
+    pass
 
-ACTIVE_TRADE = {
-    "symbol": None,
-    "entry_price": 0.0,
-    "quantity": 0,
-    "initial_sl": 0.0,
-    "current_sl": 0.0,
-    "trailing_activated": False,
-    "transaction_type": None
-}
+# Process OAuth redirect token from Zerodha
+if "request_token" in st.query_params:
+    token = st.query_params["request_token"]
 
-LOT_SIZES = {
-    "NIFTY": 25,
-    "BANKNIFTY": 15,
-    "FINNIFTY": 25
-}
+    if session_authenticated:
+        st.query_params.clear()
+        st.rerun()
+    else:
+        st.info("🔄 Authenticating session with Oracle Backend...")
+        try:
+            res = requests.get(
+                f"{BACKEND_URL}/callback",
+                params={"request_token": token},
+                timeout=10,
+            )
+            st.query_params.clear()
 
-INDEX_TOKENS = {
-    "NIFTY": {"token": 256265, "symbol": "NSE:NIFTY 50", "lot": 25},
-    "BANKNIFTY": {"token": 260105, "symbol": "NSE:NIFTY BANK", "lot": 15},
-    "FINNIFTY": {"token": 257801, "symbol": "NSE:NIFTY FIN SERVICE", "lot": 25},
-}
+            if res.status_code == 200:
+                st.success("✅ Connected to Zerodha successfully!")
+                st.rerun()
+            else:
+                st.error(f"❌ Backend Auth Failure: {res.text}")
+        except Exception as e:
+            st.query_params.clear()
+            st.error(f"❌ Connection to Oracle Cloud failed: {e}")
 
-def get_saved_token():
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE, "r") as f:
-            t = f.read().strip()
-            if t: return t
-    return None
+# Render live system metrics
+health_data = {}
+try:
+    res = requests.get(f"{BACKEND_URL}/health", timeout=3).json()
+    status_color = res.get("status", "RED")
+    status_msg = res.get("message", "Offline")
+    health_data = res.get("checks", {})
 
-# ==========================================
-# 2. TECHNICAL INDICATORS & CONFLUENCE
-# ==========================================
-def calculate_rsi(series: pd.Series, period: int = 9) -> pd.Series:
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -1 * delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    if status_color == "GREEN":
+        st.success(f"🟢 **SYSTEM ACTIVE:** {status_msg}")
+    else:
+        st.error(f"🔴 **SYSTEM DISCONNECTED:** {status_msg}")
 
-def calculate_wma(series: pd.Series, length: int = 21) -> pd.Series:
-    weights = np.arange(1, length + 1)
-    return series.rolling(length).apply(
-        lambda window: np.dot(window, weights) / weights.sum(), raw=True
+    if not health_data.get("login_authenticated", False):
+        st.link_button(
+            label="🔑 Click Here to Login to Zerodha",
+            url=KITE_LOGIN_URL,
+            use_container_width=True,
+            type="primary",
+        )
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric(
+        "Kite Session",
+        (
+            "Connected"
+            if health_data.get("login_authenticated")
+            else "Disconnected"
+        ),
+    )
+    col2.metric(
+        "IP Whitelist (92.4.85.1)",
+        "Active" if health_data.get("ip_whitelisted") else "Pending",
+    )
+    col3.metric(
+        "Cloud Engine",
+        "Running" if health_data.get("service_active") else "Stopped",
     )
 
-def calculate_linreg_series(series: pd.Series, length: int = 11) -> pd.Series:
-    x = np.arange(length)
-    x_mean = x.mean()
-    x_var = ((x - x_mean) ** 2).sum()
+except Exception:
+    st.error("🔴 **SERVER UNREACHABLE:** Oracle Cloud backend is offline.")
 
-    def get_linreg_val(window):
-        if len(window) < length:
-            return np.nan
-        y_mean = window.mean()
-        slope = ((x - x_mean) * (window - y_mean)).sum() / x_var
-        intercept = y_mean - slope * x_mean
-        return intercept + slope * (length - 1)
+st.divider()
 
-    return series.rolling(window=length).apply(get_linreg_val, raw=True)
+tab1, tab2, tab3 = st.tabs(
+    ["⚙️ Strategy Controls", "🚀 Push Manual Trade", "📋 System Audit Logs"]
+)
 
-def check_hm_linreg_confluence(df: pd.DataFrame) -> str:
-    if df.empty or len(df) < 30:
-        return "HOLD"
+with tab1:
+    st.subheader("Strategy Parameters & Session Controls")
+    st.text("Indices Enabled: NIFTY 50 | BANKNIFTY | FINNIFTY")
+    st.text("Execution Rules: Max 2 trades/session | Hard Exit @ 3:05 PM")
 
-    df = df.copy()
-    df["rsi9"] = calculate_rsi(df["close"], period=9)
-    df["hm_price_ema3"] = df["rsi9"].ewm(span=3, adjust=False).mean()
-    df["hm_strength_wma21"] = calculate_wma(df["rsi9"], length=21)
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("🚨 Emergency Square Off All", type="primary"):
+            try:
+                sq = requests.post(f"{BACKEND_URL}/square_off", timeout=5).json()
+                st.warning(f"Square Off Signal: {sq.get('message')}")
+            except Exception as e:
+                st.error(f"Execution Error: {e}")
 
-    df["bopen"] = calculate_linreg_series(df["open"], length=11)
-    df["bclose"] = calculate_linreg_series(df["close"], length=11)
-    df["signal_line"] = df["bclose"].rolling(window=11).mean()
+    with col_btn2:
+        if st.button("🔄 Sync Account & Margins"):
+            try:
+                sy = requests.get(f"{BACKEND_URL}/sync", timeout=5).json()
+                if sy.get("status") == "SUCCESS":
+                    st.success(f"Available Equity Margin: ₹{sy.get('margin')}")
+                else:
+                    st.error(f"Sync Failed: {sy}")
+            except Exception as e:
+                st.error(f"Sync Request Error: {e}")
 
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
+with tab2:
+    st.subheader("🚀 Push Manual Signal / Instant Trade")
+    with st.form("push_trade_form"):
+        col_t1, col_t2 = st.columns(2)
+        with col_t1:
+            exchange = st.selectbox("Exchange", ["NSE", "NFO"])
+            symbol = st.text_input("Trading Symbol", value="IDEA")
+            transaction_type = st.radio(
+                "Transaction Type", ["BUY", "SELL"], horizontal=True
+            )
+        with col_t2:
+            quantity = st.number_input(
+                "Quantity", min_value=1, value=1, step=1
+            )
+            order_type = st.selectbox("Order Type", ["LIMIT", "MARKET"])
 
-    linreg_bull_cross = (latest["bclose"] > latest["signal_line"]) and (prev["bclose"] <= prev["signal_line"])
-    linreg_bear_cross = (latest["bclose"] < latest["signal_line"]) and (prev["bclose"] >= prev["signal_line"])
+        price = 0.0
+        if order_type == "LIMIT":
+            price = st.number_input("Limit Price", min_value=0.05, value=1.00)
 
-    hm_bullish = latest["hm_price_ema3"] > latest["hm_strength_wma21"]
-    hm_bearish = latest["hm_price_ema3"] < latest["hm_strength_wma21"]
+        if st.form_submit_button("⚡ Push Trade Order", type="primary"):
+            payload = {
+                "exchange": exchange,
+                "symbol": symbol,
+                "transaction_type": transaction_type,
+                "quantity": quantity,
+                "order_type": order_type,
+                "price": price,
+            }
+            try:
+                res = requests.post(
+                    f"{BACKEND_URL}/push_trade", json=payload, timeout=5
+                )
+                if res.status_code == 200:
+                    tr = res.json()
+                    st.success(f"Order Placed! Order ID: {tr.get('order_id')}")
+                else:
+                    st.error(f"Trade Rejected by Backend: {res.text}")
+            except Exception as e:
+                st.error(f"Trade Execution Failed: {e}")
 
-    if linreg_bull_cross and hm_bullish:
-        return "BUY_CE"
-    elif linreg_bear_cross and hm_bearish:
-        return "BUY_PE"
-
-    return "HOLD"
-
-# ==========================================
-# 3. SYNCHRONIZED TWO-STEP STRATEGY
-# ==========================================
-def evaluate_two_step_signal(kite, symbol_key):
-    try:
-        idx_info = INDEX_TOKENS.get(symbol_key)
-        if not idx_info:
-            return "HOLD", None, 0.0
-
-        to_date = datetime.now()
-        from_date = to_date - pd.Timedelta(days=3)
-
-        idx_candles = kite.historical_data(idx_info["token"], from_date, to_date, "5minute")
-        df_idx = pd.DataFrame(idx_candles)
-        index_signal = check_hm_linreg_confluence(df_idx)
-
-        if index_signal == "HOLD":
-            return "HOLD", None, 0.0
-
-        trigger_row = df_idx.iloc[-1]
-        trigger_time = trigger_row.get('date')
-
-        quote_data = kite.ltp([idx_info["symbol"]])
-        ltp = quote_data[idx_info["symbol"]]['last_price']
-        strike_step = 50 if symbol_key in ["NIFTY", "FINNIFTY"] else 100
-        atm_strike = int(round(ltp / strike_step) * strike_step)
-        option_type = "CE" if index_signal == "BUY_CE" else "PE"
-        
-        opt_symbol = f"{symbol_key}26SEP{atm_strike}{option_type}"
-
-        instruments = kite.instruments("NFO")
-        opt_token = next((i["instrument_token"] for i in instruments if i["tradingsymbol"] == opt_symbol), None)
-
-        if opt_token:
-            opt_candles = kite.historical_data(opt_token, from_date, to_date, "5minute")
-            df_opt = pd.DataFrame(opt_candles)
-            if not df_opt.empty and 'date' in df_opt.columns:
-                # Strictly synchronize option data up to the index trigger timestamp
-                matched_opt = df_opt[df_opt['date'] <= trigger_time]
-                if len(matched_opt) >= 30:
-                    opt_signal = check_hm_linreg_confluence(matched_opt)
-                    if opt_signal != "HOLD" and opt_signal == index_signal:
-                        swing_low = float(matched_opt["low"].iloc[-5:].min())
-                        return index_signal, opt_symbol, swing_low
-
-        return "HOLD", None, 0.0
-    except Exception as e:
-        print(f"[Two-Step Evaluation Error]: {e}")
-        return "HOLD", None, 0.0
-
-def log_trade(symbol, action, price):
-    file_exists = os.path.exists(TRADE_LOG_FILE)
-    with open(TRADE_LOG_FILE, mode="a", newline="") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["Timestamp", "Symbol", "Action", "Price"])
-        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), symbol, action, price])
-
-# ==========================================
-# 4. API ENDPOINTS & BACKGROUND ENGINE
-# ==========================================
-@app.get("/health")
-def health_check():
-    return {"status": "running", "session_state": SESSION_STATE}
-
-def background_trading_engine():
-    token = get_saved_token()
-    if not token:
-        print("❌ Background Engine Error: No access token available.")
-        return
-
-    kite = KiteConnect(api_key=API_KEY)
-    kite.set_access_token(token)
-
-    print("🚀 Background Trading Engine Started Successfully.")
-    while True:
+with tab3:
+    st.subheader("System Event Logs")
+    if st.button("Refresh Logs"):
         try:
-            now = datetime.now()
-            # Run checks across symbols during market hours (9:15 AM to 3:30 PM)
-            if 9 <= now.hour <= 15:
-                for symbol_key in INDEX_TOKENS.keys():
-                    if SESSION_STATE["trades_today"][symbol_key] < MAX_TRADES_PER_SESSION:
-                        signal, opt_symbol, stop_loss = evaluate_two_step_signal(kite, symbol_key)
-                        SESSION_STATE["active_signal"] = signal
-
-                        if signal != "HOLD" and opt_symbol:
-                            print(f"⚡ Valid Trade Found: {signal} on {opt_symbol}")
-                            log_trade(opt_symbol, signal, 0.0)
-                            SESSION_STATE["trades_today"][symbol_key] += 1
-                            SESSION_STATE["last_trade_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        
-            ttime.sleep(60)
+            lg = requests.get(f"{BACKEND_URL}/logs", timeout=3).json()
+            st.code(lg.get("logs"), language="text")
         except Exception as e:
-            print(f"[Engine Loop Error]: {e}")
-            ttime.sleep(60)
-
-@app.on_event("startup")
-def startup_event():
-    engine_thread = threading.Thread(target=background_trading_engine, daemon=True)
-    engine_thread.start()
+            st.error(f"Error fetching server logs: {e}")
