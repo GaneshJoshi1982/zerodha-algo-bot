@@ -1,13 +1,11 @@
-"""Phase 2M.3 Streamlit entrypoint.
+"""Oracle-backed Streamlit dashboard entrypoint.
 
-Preserves the complete legacy analysis application while replacing its runtime Zerodha
-session object with the protected Oracle read-only client. The always-on trading engine
-remains on Oracle; this process is display/analysis only.
+Oracle is the always-on trading brain. Streamlit is monitor/analysis only: closing or
+refreshing this screen cannot stop the PAPER engine.
 """
 from __future__ import annotations
 
 import streamlit as st
-
 import app as legacy_app
 from oracle_client import OracleAPIError, OracleDashboardClient
 from trading_monitor_ui import render_auto_trading_monitor
@@ -46,7 +44,7 @@ def _handle_callback(client: OracleDashboardClient) -> None:
 
 
 def _show_login(client: OracleDashboardClient) -> None:
-    st.warning("Zerodha authentication is required. Oracle will keep PAPER execution blocked until authentication succeeds.")
+    st.warning("Zerodha authentication is required. Oracle keeps PAPER execution blocked until authentication succeeds.")
     try:
         payload = client.auth_login()
         url = payload.get("login_url") or payload.get("url")
@@ -59,13 +57,11 @@ def _show_login(client: OracleDashboardClient) -> None:
 
 
 def oracle_authenticated_kite(client: OracleDashboardClient):
-    """Drop-in replacement for legacy get_authenticated_kite()."""
     try:
         status = client.auth_status()
     except OracleAPIError as exc:
         st.error(f"Oracle authentication service unavailable: {exc}")
         return None
-
     if bool(status.get("authenticated")) or status.get("state") == "AUTHENTICATED":
         return client
     _show_login(client)
@@ -73,18 +69,25 @@ def oracle_authenticated_kite(client: OracleDashboardClient):
 
 
 def main() -> None:
+    st.set_page_config(page_title="Institutional F&O & Cash Intelligence Terminal", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     client = _client()
     if client is None:
         return
-
     _handle_callback(client)
 
-    # Preserve every existing scanner/analysis path. Only the function that supplies
-    # the Kite-like transport is replaced; calls are proxied to protected Oracle APIs.
-    legacy_app.get_authenticated_kite = lambda: oracle_authenticated_kite(client)
+    st.sidebar.title("⚡ Zerodha Trading System")
+    workspace = st.sidebar.radio("Workspace", ["🤖 Auto Trading Monitor", "📊 Analysis Dashboard"], key="oracle_workspace")
+    st.sidebar.caption("Oracle trading continues independently of this screen.")
 
-    # The monitor is rendered by the legacy app integration in the next cutover step.
-    # Until then, the full legacy UI remains byte-for-byte preserved by calling main().
+    if workspace == "🤖 Auto Trading Monitor":
+        st.title("⚡ Zerodha Trading Bot")
+        render_auto_trading_monitor(client)
+        return
+
+    # Preserve every legacy analysis/scanner path. Only authentication and market-data
+    # transport are substituted with protected Oracle calls.
+    legacy_app.get_authenticated_kite = lambda: oracle_authenticated_kite(client)
+    legacy_app.st.set_page_config = lambda *args, **kwargs: None
     legacy_app.main()
 
 
