@@ -1,7 +1,8 @@
-"""Read-only client used by the Streamlit dashboard.
+"""Protected Oracle client used by the Streamlit dashboard.
 
-Trading and broker credentials remain on the Oracle server.  This module deliberately
-contains no order-placement method.
+Trading and broker credentials remain on the Oracle server. This module contains no
+broker order-placement method. The only write operation exposed here is the persistent
+Oracle auto-trading ON/OFF control, which gates new PAPER entries server-side.
 """
 from __future__ import annotations
 
@@ -55,6 +56,14 @@ class OracleDashboardClient:
 
     def trading_monitor(self) -> dict:
         return self._request("GET", "/dashboard/trading-monitor")
+
+    def trading_engine_control(self) -> dict:
+        return self._request("GET", "/control/trading-engine")
+
+    def set_trading_engine(self, enabled: bool) -> dict:
+        return self._request(
+            "POST", "/control/trading-engine", json={"enabled": bool(enabled)}
+        )
 
     def profile(self) -> dict:
         return self._request("GET", "/dashboard/profile")
