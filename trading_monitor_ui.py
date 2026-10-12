@@ -44,7 +44,12 @@ def _position_rows(indices: dict) -> list[dict]:
                 "Stop": pos.get("stop_price"),
                 "Breakeven": bool(pos.get("breakeven_active", False)),
                 "Trailing": bool(pos.get("trailing_active", False)),
-                "Gross P&L": pos.get("gross_pnl"),
+                "Gross P&L": pos.get("unrealized_pnl") if pos.get("status") == "OPEN" else pos.get("gross_pnl"),
+                "Price updated": pos.get("price_updated_at"),
+                "Price age seconds": pos.get("price_update_age_seconds"),
+                "Freshness": pos.get("price_freshness", "NO_POSITION"),
+                "Lifecycle": pos.get("lifecycle_state") or pos.get("status"),
+                "Protection order": pos.get("protection_order_id"),
                 "Completed today": state.get("completed_trades_today", 0),
                 "Slots left": state.get("remaining_trade_slots", 0),
             }
@@ -52,22 +57,13 @@ def _position_rows(indices: dict) -> list[dict]:
     return rows
 
 
-def _render_engine_control(client) -> None:
+def _render_engine_control(client, control) -> None:
     st.markdown("#### Trading Engine Control")
-    try:
-        control = client.trading_engine_control()
-    except OracleAPIError as exc:
-        st.error(f"Trading Engine control unavailable: {exc}")
-        return
-    except Exception as exc:
-        st.error(f"Trading Engine control connection error: {exc}")
-        return
-
     enabled = bool(control.get("enabled", False))
     left, right = st.columns([2, 1])
     with left:
         if enabled:
-            st.success("Trading Engine: ON — Oracle may open new PAPER trades only when all existing safety gates permit.")
+            st.success("Trading Engine: ON — Oracle may open new trades only when all execution gates permit.")
         else:
             st.warning("Trading Engine: OFF — new automated entries are blocked.")
         st.caption(
@@ -101,15 +97,13 @@ def _render_engine_control(client) -> None:
             st.info(message)
 
 
+@st.fragment(run_every=5)
 def render_auto_trading_monitor(client) -> None:
     st.subheader("🤖 Auto Trading Monitor")
     st.caption(
         "Oracle is the always-on trading brain. Closing or refreshing this dashboard "
         "does not change the server-side Trading Engine state."
     )
-
-    _render_engine_control(client)
-    st.divider()
 
     try:
         monitor = client.trading_monitor()
@@ -123,6 +117,9 @@ def render_auto_trading_monitor(client) -> None:
         st.error(f"Trading Monitor connection error: {exc}")
         return
 
+    _render_engine_control(client, monitor.get("auto_trading") or {})
+    st.divider()
+    st.caption(f"Snapshot: {_text(monitor.get('as_of'))} | Refresh every 5 seconds | Ledger: {_text(monitor.get('ledger_mode'))}")
     auth = monitor.get("authentication") or {}
     scheduler = monitor.get("scheduler") or {}
     health = monitor.get("data_health") or {}
@@ -130,15 +127,40 @@ def render_auto_trading_monitor(client) -> None:
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Mode", _text(monitor.get("mode")))
-    c2.metric("Zerodha", "Connected" if auth.get("authenticated") else _text(auth.get("state"), "AUTH_REQUIRED"))
+    c2.metric("Zerodha", "Authenticated at last check" if auth.get("authenticated") else _text(auth.get("state"), "AUTH_REQUIRED"))
     c3.metric("Scheduler", "Running" if scheduler.get("running") else "Stopped")
     c4.metric("Market", _text(calendar.get("session_state")))
     c5.metric("Execution eligible", "YES" if health.get("execution_eligible") else "NO")
 
-    if monitor.get("live_execution_implemented"):
-        st.error("Safety warning: server reports LIVE execution implemented.")
+    st.caption(f"Authentication last checked: {_text(auth.get('last_check_at'))}")
+    if not auth.get("authenticated"):
+        st.warning("Zerodha login is required. Monitoring refresh uses the saved authentication status.")
+        if st.button("Get Zerodha login link"):
+            try:
+                login = client.auth_login()
+                url = login.get("login_url") or login.get("url")
+                if url:
+                    st.session_state["monitor_login_url"] = url
+            except Exception:
+                st.error("Unable to obtain login link from Oracle.")
+        if st.session_state.get("monitor_login_url"):
+            st.link_button("Login with Zerodha", st.session_state["monitor_login_url"])
     else:
-        st.info("Safety: LIVE broker execution is locked. Trading Engine control applies to PAPER new entries only.")
+        st.session_state.pop("monitor_login_url", None)
+    if monitor.get("ledger_mode") == "LIVE":
+        st.warning("LIVE ledger: real broker orders may be enabled. Turning the engine OFF blocks new entries; it does not close an open position.")
+        handoff = monitor.get("live_handoff") or {}
+        if not handoff.get("running") or not handoff.get("authorized"):
+            st.error("LIVE position worker is not ready. Check Oracle and broker positions.")
+    else:
+        st.info("PAPER ledger. Check the execution controls above for the current broker authorization.")
+    stream = monitor.get("tick_monitor") or {}
+    if stream.get("session_active") and not stream.get("connected"):
+        st.warning("Quote stream is disconnected. Check price freshness before using displayed prices.")
+    stale = [name for name,state in (monitor.get("indices") or {}).items()
+             if (state.get("open_position") or {}).get("price_freshness") in ("STALE","UNKNOWN","INVALID_TIME")]
+    if stale:
+        st.warning("Price is stale or unavailable for: " + ", ".join(stale))
 
     if not health.get("healthy"):
         st.warning(f"Market data health: {_text(health.get('reason'), 'NOT HEALTHY')}. Automatic entry remains blocked when required data is unhealthy.")
@@ -164,7 +186,7 @@ def render_auto_trading_monitor(client) -> None:
         columns = [c for c in preferred if c in closed_df.columns]
         st.dataframe(closed_df[columns] if columns else closed_df, use_container_width=True, hide_index=True)
     else:
-        st.caption("No completed PAPER trades recorded for the current trading day.")
+        st.caption("No completed trades recorded for the current trading day.")
 
     with st.expander("Engine diagnostics"):
         st.write("As of:", _text(monitor.get("as_of")))
@@ -172,3 +194,4 @@ def render_auto_trading_monitor(client) -> None:
         st.write("Last lifecycle monitor:", _text(scheduler.get("last_paper_lifecycle_at")))
         st.write("Data health checked:", _text(health.get("checked_at")))
         st.write("Chain analytics eligible:", bool(health.get("chain_analytics_eligible", False)))
+
