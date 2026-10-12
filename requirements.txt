@@ -3,8 +3,9 @@ uvicorn
 pydantic
 kiteconnect
 requests
-streamlit
+streamlit>=1.37
 pandas
 numpy
 yfinance
 pyotp
+
