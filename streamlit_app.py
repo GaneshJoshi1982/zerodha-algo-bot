@@ -126,14 +126,6 @@ def main() -> None:
 
     if workspace == "🤖 Auto Trading Monitor":
         st.title("⚡ Zerodha Trading Bot")
-        try:
-            auth = client.auth_status()
-            if bool(auth.get("authenticated")) or auth.get("state") == "AUTHENTICATED":
-                st.success("Zerodha Connected")
-            else:
-                _show_login(client)
-        except OracleAPIError as exc:
-            st.error(f"Oracle authentication service unavailable: {exc}")
         render_auto_trading_monitor(client)
         return
 
@@ -146,3 +138,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
